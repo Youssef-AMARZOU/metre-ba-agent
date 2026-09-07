@@ -1,0 +1,22 @@
+{
+  "notice": "Synthetic metadata only. No Kaggle raw data is included.",
+  "license": "CC BY-NC-SA 4.0",
+  "datasets": [
+    {
+      "id": "rc-beams-dataset-v1-25-reinforced-concrete-beam",
+      "family": "POUTRE",
+      "source": "masterpn/rc-beams-dataset-v1-25-reinforced-concrete-beam",
+      "status": "not_downloaded",
+      "projects": ["synthetic-beam-fixture"],
+      "splits": {"train": 1, "validation": 1, "test": 1}
+    },
+    {
+      "id": "walls-dataset-v2-25-reinforced-wall",
+      "family": "VOILE",
+      "source": "masterpn/walls-dataset-v2-25-reinforced-wall",
+      "status": "not_downloaded",
+      "projects": ["synthetic-wall-fixture"],
+      "splits": {"train": 1, "validation": 1, "test": 1}
+    }
+  ]
+}

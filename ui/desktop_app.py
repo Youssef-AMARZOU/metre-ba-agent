@@ -706,9 +706,20 @@ class PlanBAMetreApp(*_DND_BASES):
                 ingestion_result = ingestor.ingest()
                 self.after(0, lambda: self._log(
                     f"Source : {ingestion_result.source.value} | "
-                    f"Blocs texte : {len(ingestion_result.text_blocks)}"))
-                self.plan_data = extractor.extract_from_text_blocks(
-                    ingestion_result.text_blocks)
+                    f"Blocs texte : {len(ingestion_result.text_blocks)} | "
+                    f"Éléments IR : {len(ingestion_result.drawing_elements)}"))
+                if ingestion_result.errors:
+                    for error in ingestion_result.errors:
+                        self.after(0, lambda error=error:
+                                   self._log(f"⚠ Adaptateur : {error}"))
+                if ingestion_result.status.value == "error":
+                    from core.local_extractor import partial_plan_data
+                    self.plan_data = partial_plan_data(
+                        "; ".join(ingestion_result.errors)
+                        or "Adaptateur indisponible")
+                else:
+                    self.plan_data = extractor.extract_from_text_blocks(
+                        ingestion_result.text_blocks)
 
             nom_saisi = None
             try:

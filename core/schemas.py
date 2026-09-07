@@ -7,9 +7,27 @@ Aucune valeur hardcodée de projet antérieur n'est autorisée ici.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class DrawingElement(BaseModel):
+    """Représentation canonique d'un élément lu sur un dessin.
+
+    Le modèle reste indépendant du moteur (PDF, OCR ou DAO) afin de
+    conserver une provenance exploitable jusqu'aux livrables.
+    """
+    id: str
+    text: str = ""
+    bbox: Optional[Tuple[float, float, float, float]] = None
+    page: Optional[int] = Field(None, ge=1)
+    source: str = "unknown"
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(frozen=True)
 
 
 # ============================================================================
@@ -21,6 +39,7 @@ class FamilleElement(str, Enum):
     SEMELLE = "SEMELLE"
     POTEAU = "POTEAU"
     POUTRE = "POUTRE"
+    VOILE = "VOILE"
     LONGRINE = "LONGRINE"
     CHAINAGE = "CHAINAGE"
     DALLE = "DALLE"

@@ -55,6 +55,7 @@ class PlanSource(str, Enum):
     DWG = "dwg"
     PDF_VECTORIEL = "pdf_vectoriel"
     PDF_RASTER = "pdf_raster"
+    PDF_HYBRIDE = "pdf_hybride"
     IMAGE = "image"
     UNKNOWN = "unknown"
 
@@ -78,6 +79,7 @@ class IngestionResult:
     file_hash: str = ""
     pages: int = 0
     text_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    drawing_elements: List[Dict[str, Any]] = field(default_factory=list)
     table_rows: List[Dict[str, Any]] = field(default_factory=list)
     dimensions: List[Dict[str, Any]] = field(default_factory=list)
     images: List[bytes] = field(default_factory=list)
@@ -93,12 +95,81 @@ class IngestionResult:
             "file_hash": self.file_hash,
             "pages": self.pages,
             "nb_text_blocks": len(self.text_blocks),
+            "nb_drawing_elements": len(self.drawing_elements),
             "nb_table_rows": len(self.table_rows),
             "nb_dimensions": len(self.dimensions),
             "nb_images": len(self.images),
             "errors": self.errors,
             "metadata": self.metadata,
         }
+
+
+def optional_dependencies() -> Dict[str, bool]:
+    """Retourne la disponibilité des adaptateurs sans les rendre obligatoires."""
+    names = {
+        "pymupdf": "fitz",
+        "pdfplumber": "pdfplumber",
+        "pillow": "PIL",
+        "ezdxf": "ezdxf",
+        "opencv": "cv2",
+        "paddleocr": "paddleocr",
+    }
+    available = {}
+    for name, module in names.items():
+        try:
+            __import__(module)
+            available[name] = True
+        except ImportError:
+            available[name] = False
+    return available
+
+
+def fuse_spatial_elements(elements: List[Dict[str, Any]],
+                          distance: float = 4.0) -> List[Dict[str, Any]]:
+    """Fusionne les fragments proches tout en conservant leur provenance."""
+    fused: List[Dict[str, Any]] = []
+    for element in elements:
+        bbox = element.get("bbox")
+        if not bbox:
+            fused.append(dict(element))
+            continue
+        match = None
+        for candidate in fused:
+            cb = candidate.get("bbox")
+            if not cb or candidate.get("page") != element.get("page"):
+                continue
+            if (bbox[0] <= cb[2] + distance and cb[0] <= bbox[2] + distance
+                    and bbox[1] <= cb[3] + distance
+                    and cb[1] <= bbox[3] + distance):
+                match = candidate
+                break
+        if match is None:
+            fused.append(dict(element))
+            continue
+        match["text"] = f"{match.get('text', '')} {element.get('text', '')}".strip()
+        old = match.setdefault("provenance", {})
+        old.setdefault("fragments", []).append(element.get("id"))
+        match["bbox"] = (
+            min(match["bbox"][0], bbox[0]), min(match["bbox"][1], bbox[1]),
+            max(match["bbox"][2], bbox[2]), max(match["bbox"][3], bbox[3]),
+        )
+        match["confidence"] = min(float(match.get("confidence", 0.0)),
+                                  float(element.get("confidence", 0.0)))
+    return fused
+
+
+def _drawing_element(text: str, bbox, page: int, source: str,
+                     element_id: str, confidence: float = 1.0) -> Dict[str, Any]:
+    return {
+        "id": element_id,
+        "text": text,
+        "bbox": tuple(round(float(v), 2) for v in bbox) if bbox else None,
+        "page": page,
+        "source": source,
+        "confidence": confidence,
+        "provenance": {"adapter": source, "page": page},
+        "warnings": [],
+    }
 
 
 # ============================================================================
@@ -135,7 +206,15 @@ def file_hash(file_path: str) -> str:
 
 def _parse_dxf(file_path: str) -> IngestionResult:
     """Parse un fichier DXF nativement via ezdxf."""
-    import ezdxf
+    try:
+        import ezdxf
+    except ImportError:
+        return IngestionResult(
+            source=PlanSource.DXF, status=IngestionStatus.ERROR,
+            file_path=file_path, file_hash=file_hash(file_path),
+            errors=["Adaptateur ezdxf absent : installez l'option DXF "
+                    "ou exportez le plan en PDF/DXF."],
+        )
     from ezdxf import recover
 
     result = IngestionResult(
@@ -171,6 +250,9 @@ def _parse_dxf(file_path: str) -> IngestionResult:
                     "layer": layer,
                     "type": etype,
                 })
+                result.drawing_elements.append(_drawing_element(
+                    text.strip(), (x, y, x, y), 1, "ezdxf",
+                    f"dxf-text-{len(result.drawing_elements) + 1}"))
 
         elif etype == "INSERT":
             block_name = entity.dxf.name
@@ -285,7 +367,15 @@ def _parse_pdf_vectoriel(file_path: str) -> IngestionResult:
 
 def _parse_image(file_path: str, target_dpi: int = DPI_RASTER) -> IngestionResult:
     """Charge une image et la normalise en RGB."""
-    from PIL import Image
+    try:
+        from PIL import Image
+    except ImportError:
+        return IngestionResult(
+            source=PlanSource.IMAGE, status=IngestionStatus.ERROR,
+            file_path=file_path, file_hash=file_hash(file_path),
+            errors=["Adaptateur Pillow absent : installez Pillow pour "
+                    "les images raster."],
+        )
 
     result = IngestionResult(
         source=PlanSource.IMAGE,
@@ -493,8 +583,10 @@ class UniversalPlanIngestor:
         les images 300 DPI pour l'inférence vision (plans graphiques
         avec texte dispersé graphiquement).
         """
-        import fitz
-        import io
+        try:
+            import fitz
+        except ImportError:
+            return self._parse_pdfplumber()
 
         result = IngestionResult(
             source=PlanSource.PDF_VECTORIEL,
@@ -511,9 +603,12 @@ class UniversalPlanIngestor:
             return result
 
         result.pages = len(doc)
+        has_vector = False
+        has_raster = False
 
         for pi in range(len(doc)):
             page = doc[pi]
+            has_raster = has_raster or bool(page.get_images(full=True))
 
             # Rendu adaptatif : les plans A0/A1 restent lisibles sans
             # produire des images démesurées en mémoire.
@@ -548,12 +643,68 @@ class UniversalPlanIngestor:
                                         "font_size": round(
                                             span.get("size", 0), 1),
                                     })
+                                    result.drawing_elements.append(_drawing_element(
+                                            t, bbox, pi + 1, "pymupdf",
+                                            f"pdf-{pi + 1}-{len(result.drawing_elements) + 1}"))
+                                    has_vector = True
 
         doc.close()
 
-        if result.images:
-            result.status = IngestionStatus.PARTIAL  # a besoin de vision
+        if has_vector and has_raster:
+            result.source = PlanSource.PDF_HYBRIDE
+            result.metadata["mode"] = "hybrid"
+        elif has_raster:
+            result.source = PlanSource.PDF_RASTER
+            result.metadata["mode"] = "raster"
+        else:
+            result.metadata["mode"] = "vector"
+        result.drawing_elements = fuse_spatial_elements(result.drawing_elements)
+        if result.images and not result.text_blocks:
+            result.status = IngestionStatus.PARTIAL
+        elif result.images:
+            result.status = IngestionStatus.PARTIAL
+        result.metadata["dependencies"] = optional_dependencies()
 
+        return result
+
+    def _parse_pdfplumber(self) -> IngestionResult:
+        """Fallback texte léger quand PyMuPDF n'est pas disponible."""
+        try:
+            import pdfplumber
+        except ImportError:
+            return IngestionResult(
+                source=PlanSource.PDF_VECTORIEL, status=IngestionStatus.ERROR,
+                file_path=self.file_path, file_hash=file_hash(self.file_path),
+                errors=["Aucun adaptateur PDF disponible. Installez "
+                        "PyMuPDF ou pdfplumber (optionnels)."],
+            )
+        result = IngestionResult(
+            source=PlanSource.PDF_VECTORIEL, status=IngestionStatus.PARTIAL,
+            file_path=self.file_path, file_hash=file_hash(self.file_path),
+            metadata={"mode": "vector", "adapter": "pdfplumber",
+                      "warnings": ["Rendu raster indisponible sans PyMuPDF."]},
+        )
+        try:
+            with pdfplumber.open(self.file_path) as doc:
+                result.pages = len(doc.pages)
+                for page_num, page in enumerate(doc.pages, 1):
+                    for idx, word in enumerate(page.extract_words() or []):
+                        text = (word.get("text") or "").strip()
+                        if not text:
+                            continue
+                        bbox = (word.get("x0", 0), word.get("top", 0),
+                                word.get("x1", 0), word.get("bottom", 0))
+                        result.text_blocks.append({
+                            "text": text, "x": bbox[0], "y": bbox[1],
+                            "x1": bbox[2], "y1": bbox[3], "page": page_num,
+                        })
+                        result.drawing_elements.append(_drawing_element(
+                            text, bbox, page_num, "pdfplumber",
+                            f"pdf-{page_num}-{idx}"))
+        except Exception as exc:
+            result.status = IngestionStatus.ERROR
+            result.errors.append(f"Lecture pdfplumber impossible : {exc}")
+        result.drawing_elements = fuse_spatial_elements(result.drawing_elements)
         return result
 
     def ingest_to_json(self) -> dict:

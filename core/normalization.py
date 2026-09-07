@@ -11,8 +11,11 @@ class NormalizedElement(TypedDict):
     reinforcement: list[dict]
     quantity: dict
     source: dict
+    bbox: tuple | None
     confidence: str
     warnings: list[str]
+    axis: str
+    grid: str
 
 
 def _as_dict(value: Any) -> dict:
@@ -67,7 +70,8 @@ def normalize_plan_data(plan_data: dict) -> dict:
         for placement in _as_list(implantations.get(category)):
             item = _as_dict(placement)
             repere = str(item.get("type") or item.get("id") or "INCONNU")
-            dimensions = _as_dict(catalog.get(repere))
+            raw_dimensions = _as_dict(catalog.get(repere))
+            dimensions = raw_dimensions
             dimensions = {
                 key: _number(dimensions.get(key))
                 for key in ("a", "b", "h", "portee", "hauteur")
@@ -95,7 +99,7 @@ def normalize_plan_data(plan_data: dict) -> dict:
                 bars += _bars(_as_dict(spec).get("filants_sup"), "filant_sup")
                 bars += _bars([_as_dict(spec).get("cadres")], "cadre")
 
-            missing = bool(dimensions.get("dimensions_par_defaut")
+            missing = bool(raw_dimensions.get("dimensions_par_defaut")
                           or item.get("position_par_defaut"))
             confidence = "low" if missing else "high"
             item_warnings = []
@@ -114,9 +118,12 @@ def normalize_plan_data(plan_data: dict) -> dict:
                 "quantity": {"count": 1, "unit": "u"},
                 "reinforcement": bars,
                 "source": {
-                    "pages": meta.get("semelles_pages", {}).get(repere, []),
+                    "pages": item.get("pages") or meta.get(
+                        "semelles_pages", {}).get(repere, []),
                     "engine": meta.get("moteur", "unknown"),
+                    "provenance": item.get("provenance", {}),
                 },
+                "bbox": item.get("bbox"),
                 "confidence": confidence,
                 "warnings": item_warnings,
             })
