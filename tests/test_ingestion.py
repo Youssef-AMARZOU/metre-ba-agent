@@ -107,6 +107,61 @@ class TestIngestionResult(unittest.TestCase):
         self.assertEqual(d["pages"], 3)
         self.assertIsInstance(d["errors"], list)
 
+    def test_drawing_element_contract(self):
+        from core.schemas import DrawingElement
+        element = DrawingElement(
+            id="pdf-1-1", text="S1(120x120x30)",
+            bbox=(10, 20, 100, 40), page=1, source="pymupdf",
+            confidence=0.95, provenance={"adapter": "pymupdf"})
+        self.assertEqual(element.bbox, (10, 20, 100, 40))
+        self.assertEqual(element.provenance["adapter"], "pymupdf")
+
+
+class TestRealIngestionMatrix(unittest.TestCase):
+    """Matrice sur artefacts réels, sans remplacer les adaptateurs par mocks."""
+
+    def test_vector_pdf_has_ir_and_bbox(self):
+        import fitz
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "vector.pdf")
+            doc = fitz.open()
+            page = doc.new_page(width=595, height=842)
+            page.insert_text((80, 100), "S1(120x120x30)")
+            doc.save(path)
+            doc.close()
+            result = UniversalPlanIngestor(path).ingest()
+            self.assertEqual(result.source, PlanSource.PDF_VECTORIEL)
+            self.assertTrue(result.drawing_elements)
+            self.assertTrue(result.drawing_elements[0]["bbox"])
+
+    def test_hybrid_pdf_keeps_vector_and_raster(self):
+        import fitz
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "hybrid.pdf")
+            image_path = os.path.join(td, "page.png")
+            from PIL import Image, ImageDraw
+            image = Image.new("RGB", (400, 300), "white")
+            ImageDraw.Draw(image).text((10, 10), "scan", fill="black")
+            image.save(image_path)
+            doc = fitz.open()
+            page = doc.new_page(width=595, height=842)
+            page.insert_text((80, 100), "S2")
+            page.insert_image((200, 200, 500, 500), filename=image_path)
+            doc.save(path)
+            doc.close()
+            result = UniversalPlanIngestor(path).ingest()
+            self.assertEqual(result.source, PlanSource.PDF_HYBRIDE)
+            self.assertTrue(result.images)
+            self.assertTrue(result.text_blocks)
+
+    def test_large_raster_is_tiled(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "large.png")
+            Image.new("RGB", (4096, 4096), "white").save(path)
+            result = UniversalPlanIngestor(path).ingest()
+            self.assertGreater(len(result.images), 1)
+
 
 class TestExtractPlan(unittest.TestCase):
     """Test extract_plan.py (import et extraction déterministe)."""

@@ -1,0 +1,23 @@
+version: 1
+license_notice: "CC BY-NC-SA 4.0 - attribution required; non-commercial use only; share adaptations alike."
+datasets:
+  - id: rc-beams-dataset-v1-25-reinforced-concrete-beam
+    kaggle_slug: masterpn/rc-beams-dataset-v1-25-reinforced-concrete-beam
+    family: POUTRE
+    license: CC BY-NC-SA 4.0
+    local_dir: dataset/external/kaggle/rc-beams-dataset-v1-25-reinforced-concrete-beam
+    attribution: "masterpn, rc-beams-dataset-v1-25-reinforced-concrete-beam"
+    expected:
+      splits: [train, validation, test]
+      media_extensions: [".png", ".jpg", ".jpeg", ".pdf"]
+      metadata_files: [metadata.json, labels.json]
+  - id: walls-dataset-v2-25-reinforced-wall
+    kaggle_slug: masterpn/walls-dataset-v2-25-reinforced-wall
+    family: VOILE
+    license: CC BY-NC-SA 4.0
+    local_dir: dataset/external/kaggle/walls-dataset-v2-25-reinforced-wall
+    attribution: "masterpn, walls-dataset-v2-25-reinforced-wall"
+    expected:
+      splits: [train, validation, test]
+      media_extensions: [".png", ".jpg", ".jpeg", ".pdf"]
+      metadata_files: [metadata.json, labels.json]

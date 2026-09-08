@@ -1,5 +1,4 @@
 # Dépendances Python (3.10+)
-pdfplumber>=0.11
 PyMuPDF>=1.24
 openpyxl>=3.1
 PyYAML>=6.0
@@ -12,6 +11,12 @@ python-multipart>=0.0.18
 
 # Optionnel — vision API (extract_plan.py --vision)
 # anthropic>=0.40
+
+# Optionnels — adaptateurs d'ingestion complémentaires
+# pdfplumber>=0.11       # fallback texte si PyMuPDF est absent
+# ezdxf>=1.3             # support DXF à la demande
+# opencv-python>=4.10    # prétraitement raster à la demande
+# paddleocr>=2.9         # OCR à installer séparément (lourd)
 
 # Optionnel — OCR local GLM-OCR (extract_plan.py --ocr glm-ocr)
 # pip install git+https://github.com/huggingface/transformers.git

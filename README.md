@@ -85,13 +85,14 @@ La première ligne télécharge le projet depuis internet (il faut avoir install
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-pip install customtkinter openpyxl reportlab PyMuPDF ezdxf Pillow pydantic tkinterdnd2
+pip install customtkinter openpyxl reportlab PyMuPDF Pillow pydantic tkinterdnd2
 ```
 
 Explications ligne par ligne :
 - `python -m venv .venv` : crée un dossier `.venv` qui contiendra une copie privée de Python pour ce projet.
 - `.\.venv\Scripts\activate` : active cet environnement (l'invite affiche alors `(.venv)` au début de la ligne).
 - Les deux lignes `pip install` téléchargent et installent les bibliothèques dont le logiciel a besoin (lecture PDF, écriture Excel, interface graphique, etc.). Cela prend quelques minutes la première fois.
+- `ezdxf`, `pdfplumber`, OpenCV et PaddleOCR sont des adaptateurs **optionnels**. Leur absence ne bloque pas le PDF vectoriel/raster de base : l'application détecte l'adaptateur manquant, conserve un livrable partiel et affiche l'avertissement correspondant. Pour le support DXF, ajoutez `pip install ezdxf`; pour un fallback PDF texte léger, ajoutez `pip install pdfplumber`.
 
 **Étape 3 : lancer l'application.**
 
@@ -125,6 +126,21 @@ Points à savoir sur l'exécutable :
 - La première ouverture peut être ralentie par l'antivirus Windows qui analyse le programme — c'est normal, patientez.
 
 ---
+
+## Adaptateurs optionnels, licences et mode dégradé
+
+Le chemin de base utilise PyMuPDF, Pillow, openpyxl et reportlab. Les modules
+optionnels sont chargés à la demande afin de ne pas alourdir l'exécutable
+PyInstaller : `ezdxf` (DXF), `pdfplumber` (fallback texte), OpenCV/PaddleOCR
+(raster/OCR). Vérifiez leurs licences respectives avant redistribution
+commerciale ; elles sont référencées dans leurs distributions et ne sont pas
+vendues avec PlanBA. La commande `python -c "from core.ingestion import
+optional_dependencies; print(optional_dependencies())"` permet de contrôler
+les adaptateurs présents.
+
+Si un adaptateur manque, le pipeline ne fabrique pas de géométrie : il écrit
+la provenance, le niveau de confiance et l'avertissement dans `plan_data.json`
+et produit quand c'est possible un Excel partiel vérifiable.
 
 ## 4. Première utilisation pas à pas
 

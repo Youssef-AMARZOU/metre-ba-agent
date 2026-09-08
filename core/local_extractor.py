@@ -22,7 +22,8 @@ import os
 import re
 import sys
 from pathlib import Path
-from core.tokenizer import decompose_etiquette_technique, expand_words
+from core.tokenizer import expand_words
+from core.tokenizer import decompose_etiquette_technique
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 logger = logging.getLogger(__name__)
@@ -269,6 +270,9 @@ class VectorPlanExtractor:
         nb, phi = acier.get("nb"), acier.get("phi")
         if nb is not None and phi is not None and 5 <= phi <= 40:
             if tk_s:
+                pages = self._semelles_pages.setdefault(tk_s, [])
+                if page_num not in pages:
+                    pages.append(page_num)
                 cur = self.global_catalogue["semelles"].get(tk_s, {})
                 if cur.get("ferr_x", {}).get("nb", 0) == 0:
                     self._merge_semelle(
@@ -494,7 +498,7 @@ class VectorPlanExtractor:
 
         # 2. Detecteur textuel universel (lignes compactes + annotations)
         found_text = self._parse_semelle_text_lines(words, page_num)
-        if found_text and page_num not in self.pages_tableau:
+        if found_text and role_auto != "plan" and page_num not in self.pages_tableau:
             self.pages_tableau.append(page_num)
 
         # 3. Parseur d'alignement historique (pages etiquetees, sans bordures)
@@ -902,6 +906,33 @@ class VectorPlanExtractor:
 
         for idx, line in enumerate(lines):
             text = line["text"]
+
+            compact_text = re.sub(r"\s+", "", text)
+            is_spatial_label = bool(
+                re.search(r"S\d+\(\d+x\d+x\d+\)", compact_text, re.I))
+            decomposition = decompose_etiquette_technique(text)
+            if (decomposition["family"] == "SEMELLE"
+                    and decomposition["reference"]
+                    and not is_spatial_label):
+                tk = decomposition["reference"]
+                spec = {}
+                dimensions = decomposition["dimensions_m"]
+                if dimensions:
+                    spec.update(dimensions)
+                if decomposition.get("ferr_x"):
+                    spec["ferr_x"] = decomposition["ferr_x"]
+                if spec:
+                    self._merge_semelle(tk, spec)
+                    pages = self._semelles_pages.setdefault(tk, [])
+                    if page_num not in pages:
+                        pages.append(page_num)
+                    found = True
+                    last_type = tk
+                    self._nomenclature_line_bands.setdefault(page_num, []).append(
+                        (line["x0"], line["y0"], line["x1"], line["y1"]))
+                    # Une nomenclature ne crée jamais une implantation.
+                    if decomposition["dimensions_m"] or decomposition.get("ferr_x"):
+                        continue
 
             # Annotation directe : S1: Semelle de 90 x 90 x 25
             for m in SEMELLE_ANNO_RX.finditer(text):
@@ -1524,19 +1555,9 @@ class VectorPlanExtractor:
                 f"({self.nb_mots} mots lus sur {self.total_pages} page(s), "
                 "0 semelle/poteau/poutre reconnue)")
         if positioned == 0:
-            default_type = next(iter(cat["semelles"]), "SEMELLE_DEFAULT")
-            cat["semelles"].setdefault(default_type, {
-                "a": 1.0, "b": 1.0, "h": 0.30,
-                "ferr_x": {"nb": 0, "phi": 0},
-                "ferr_y": {"nb": 0, "phi": 0},
-                "dimensions_par_defaut": True,
-            })
-            self.implantations["semelles"].append({
-                "id": f"{default_type}_1", "type": default_type,
-                "axe": "", "file": "", "position_par_defaut": True})
             self.warnings.append(
-                f"Aucune implantation lisible : géométrie par défaut "
-                f"{default_type} 1.00x1.00x0.30 m ajoutée, à vérifier.")
+                "Aucune implantation spatiale lisible : les types de "
+                "nomenclature sont conservés sans position fictive.")
 
         
         # --- ENRICHISSEMENT AUTOMATIQUE CATALOGUE MAROCAIN (POTEAUX Q & POUTRES) ---

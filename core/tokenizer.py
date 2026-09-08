@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 _LABEL = re.compile(r"^(S\d+|[PQ]\d+|(?:B?N\d+(?:BIS)?|PN\d+|LG\d+|CH\d*))$", re.I)
 _DIM = re.compile(r"^\(?\d{2,3}\s*[xX*]\s*\d{2,3}\)?$")
@@ -13,6 +13,78 @@ _COMPOSITE = re.compile(
     r"((?:\d+\s*(?:HA|T)\s*\d+(?:\+\d+\s*(?:HA|T)\s*\d+)*)?)$",
     re.I,
 )
+_REFERENCE = re.compile(
+    r"^(?P<reference>S\d+|[PQ]\d+|(?:B?N\d+(?:BIS)?|PN\d+|LG\d+|CH\d*))$",
+    re.I,
+)
+_DIMENSIONS = re.compile(
+    r"(?P<a>\d+(?:[.,]\d+)?)\s*[xX*]\s*"
+    r"(?P<b>\d+(?:[.,]\d+)?)"
+    r"(?:\s*[xX*]\s*(?P<h>\d+(?:[.,]\d+)?))?"
+)
+_REINFORCEMENT = re.compile(
+    r"(?P<nb>\d+)\s*(?P<kind>HA|T|TOR|Ø|PHI)\s*(?P<phi>\d{1,2})",
+    re.I,
+)
+
+
+def _metres(value: str) -> float:
+    number = float(value.replace(",", "."))
+    return number / 100.0 if number > 10 else number
+
+
+def decompose_etiquette_technique(texte: Any) -> dict:
+    """Décompose une étiquette BA et reste tolérant aux variantes OCR/CAO.
+
+    Le résultat conserve la compatibilité historique (`repere`, `a`, `b`,
+    `h`, `ferr_x`) et expose le contrat commun (`reference`, `family`,
+    `dimensions_m`, `reinforcement`).
+    """
+    text = str(texte or "").replace("×", "x").replace("*", "x").strip()
+    compact = re.sub(r"\s+", " ", text)
+    ref_match = re.search(r"\b(S\d+|[PQ]\d+|(?:B?N\d+(?:BIS)?|PN\d+|LG\d+|CH\d*))\b",
+                          compact, re.I)
+    reference = ref_match.group(1).upper() if ref_match else ""
+    if reference.startswith("S"):
+        family = "SEMELLE"
+    elif reference.startswith(("P", "Q")):
+        family = "POTEAU"
+    elif reference:
+        family = "POUTRE"
+    else:
+        family = "INCONNU"
+    dims_match = _DIMENSIONS.search(compact)
+    dimensions = {}
+    if dims_match:
+        dimensions = {
+            key: _metres(value)
+            for key, value in (
+                ("a", dims_match.group("a")),
+                ("b", dims_match.group("b")),
+                ("h", dims_match.group("h")),
+            ) if value is not None
+        }
+    bars = []
+    for match in _REINFORCEMENT.finditer(compact):
+        bars.append({
+            "count": int(match.group("nb")),
+            "diameter_mm": int(match.group("phi")),
+            "type": match.group("kind").upper(),
+            "role": "nappe_x" if family == "SEMELLE" else "longitudinal",
+            "unit": "mm",
+        })
+    result = {
+        "reference": reference,
+        "repere": reference,
+        "family": family,
+        "dimensions_m": dimensions,
+        "reinforcement": bars,
+        "warnings": [],
+    }
+    if bars and family == "SEMELLE":
+        result["ferr_x"] = {"nb": bars[0]["count"], "phi": bars[0]["diameter_mm"]}
+    result.update(dimensions)
+    return result
 
 
 def tokenize_composite(text: object) -> list[str]:
@@ -108,7 +180,7 @@ def decompose_etiquette_technique(texte: str) -> dict:
 
     # 3. Armatures
     rebar_match = re.search(
-        r"(?:(\d+)\s*)?(?:HA|T|TOR|Ø|PHI)\s*(\d{1,2})(?:\s*(?:E|ESP|@)\s*[=:]?\s*(\d+))?",
+        r"(?:(\d+)\s*)?(?:HA|T|TOR|�|PHI)\s*(\d{1,2})(?:\s*(?:E|ESP|@)\s*[=:]?\s*(\d+))?",
         txt,
         re.IGNORECASE
     )
@@ -121,5 +193,40 @@ def decompose_etiquette_technique(texte: str) -> dict:
                 elements["acier"] = {"nb": nb, "phi": phi, "esp": esp}
         except (ValueError, TypeError):
             pass
+
+    # --- Champs de compatibilite pour local_extractor._parse_semelle_text_lines ---
+    ref_key = elements.get("semelle") or elements.get("poteau") or elements.get("poutre") or ""
+    if ref_key:
+        elements["reference"] = ref_key.upper()
+    else:
+        elements["reference"] = ""
+    if elements.get("semelle"):
+        elements["family"] = "SEMELLE"
+    elif elements.get("poteau"):
+        elements["family"] = "POTEAU"
+    elif elements.get("poutre"):
+        elements["family"] = "POUTRE"
+    else:
+        elements["family"] = "INCONNU"
+    # dimensions_m : dimensions converties en metres (cm -> m)
+    dims = elements.get("dimensions") or {}
+    if dims:
+        from core.local_extractor import _cm_triplet_to_m
+        a_m, b_m, h_m = _cm_triplet_to_m(
+            [dims.get("a", 0), dims.get("b", 0), dims.get("h") or 0])
+        dm = {"a": a_m, "b": b_m}
+        if h_m:
+            dm["h"] = h_m
+        elements["dimensions_m"] = dm
+    else:
+        elements["dimensions_m"] = None
+    # ferr_x : compatibilite historique (ancien format {'nb', 'phi'})
+    acier = elements.get("acier")
+    if acier and acier.get("nb") is not None and acier.get("phi") is not None:
+        elements["ferr_x"] = {"nb": acier["nb"], "phi": acier["phi"]}
+        elements["ferr_y"] = {"nb": acier["nb"], "phi": acier["phi"]}
+    else:
+        elements["ferr_x"] = None
+        elements["ferr_y"] = None
 
     return elements
