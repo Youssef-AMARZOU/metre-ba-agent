@@ -1229,6 +1229,17 @@ class VectorPlanExtractor:
         ESC_PLAIN = re.compile(r"^(ESC\d+)$", re.I)
         MUR_PLAIN = re.compile(r"^(M\d+)$", re.I)
         RADIER_PLAIN = re.compile(r"^(R\d+)$", re.I)
+        RD_PLAIN = re.compile(r"^(RD\d+)$", re.I)
+        MS_PLAIN = re.compile(r"^(MS\d+)$", re.I)
+        LT_PLAIN = re.compile(r"^(LT\d+)$", re.I)
+        SF_PLAIN = re.compile(r"^(SF\d+)$", re.I)
+        SB_PLAIN = re.compile(r"^(SB\d+)$", re.I)
+        CV_PLAIN = re.compile(r"^(CV\d+)$", re.I)
+        PA_PLAIN = re.compile(r"^(PA\d+)$", re.I)
+        TR_PLAIN = re.compile(r"^(TR\d+)$", re.I)
+        CF_PLAIN = re.compile(r"^(CF\d+)$", re.I)
+        F_PLAIN = re.compile(r"^(F\d+)$", re.I)
+        PIE_PLAIN = re.compile(r"^(PIE\d+)$", re.I)
 
         for w in words:
             if in_nomenclature(w):
@@ -1318,6 +1329,61 @@ class VectorPlanExtractor:
                 if m:
                     hits.append((m.group(1).upper(), None, w["x"], w["y"]))
                     continue
+                # Redresseurs
+                m = RD_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Massifs
+                m = MS_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Linteaux
+                m = LT_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Semelles filantes
+                m = SF_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Sablieres
+                m = SB_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Couvertines
+                m = CV_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Poutres d'appui
+                m = PA_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Travers
+                m = TR_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Contre-forts
+                m = CF_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Futs
+                m = F_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Pieux
+                m = PIE_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
 
         # Memoriser les axes de la page (positions poteaux a la finalisation)
         if grouped or hits:
@@ -1357,20 +1423,50 @@ class VectorPlanExtractor:
             file = min(axes_numbers, key=lambda n: abs(n[1] - y))[0] \
                 if axes_numbers else ""
 
-            # Classify element type from label prefix
+            # Classify element type from label prefix — ALL types
             upper = tk.upper()
-            if upper.startswith("S"):
+            if upper.startswith("SF"):
+                elem_family = "semelles_filantes"
+            elif upper.startswith("S"):
                 elem_family = "semelles"
             elif upper.startswith(("P", "Q")):
                 elem_family = "poteaux"
-            elif upper.startswith(("N", "BN", "PN", "LG", "CH")):
+            elif upper.startswith(("N", "BN", "PN", "PA", "TR")):
                 elem_family = "poutres"
-            elif upper.startswith("D"):
+            elif upper.startswith("D") and not upper.startswith("DS"):
                 elem_family = "dalles"
-            elif upper.startswith("V"):
+            elif upper.startswith("DS"):
+                elem_family = "dalles"
+            elif upper.startswith("V") and not upper.startswith("VD") and not upper.startswith("VT"):
+                elem_family = "voiles"
+            elif upper.startswith(("VD", "VT")):
                 elem_family = "voiles"
             elif upper.startswith("ESC"):
                 elem_family = "escaliers"
+            elif upper.startswith("LG"):
+                elem_family = "longrines"
+            elif upper.startswith("CH"):
+                elem_family = "chainages"
+            elif upper.startswith("M"):
+                elem_family = "murs"
+            elif upper.startswith("R") and not upper.startswith("RD"):
+                elem_family = "radiers"
+            elif upper.startswith("RD"):
+                elem_family = "redresseurs"
+            elif upper.startswith("MS"):
+                elem_family = "massifs"
+            elif upper.startswith("LT"):
+                elem_family = "linteaux"
+            elif upper.startswith("SB"):
+                elem_family = "sablieres"
+            elif upper.startswith("CV"):
+                elem_family = "couvertines"
+            elif upper.startswith("CF"):
+                elem_family = "contre_forts"
+            elif upper.startswith("F"):
+                elem_family = "futs"
+            elif upper.startswith("PIE"):
+                elem_family = "pieux"
             else:
                 elem_family = "semelles"  # fallback
 
@@ -1433,6 +1529,58 @@ class VectorPlanExtractor:
                     self._merge_radier(tk, spec)
                 else:
                     self._merge_radier(tk, {})
+            elif elem_family == "redresseurs":
+                if dims:
+                    spec = {"a": _dim_cm_to_m(dims[0]),
+                            "b": _dim_cm_to_m(dims[1]) if dims[1] else None}
+                    self._merge_other(tk, spec, "redresseurs")
+                else:
+                    self._merge_other(tk, {}, "redresseurs")
+            elif elem_family == "massifs":
+                if dims:
+                    spec = {"a": _dim_cm_to_m(dims[0]),
+                            "b": _dim_cm_to_m(dims[1]),
+                            "h": _dim_cm_to_m(dims[2]) if dims[2] else None}
+                    self._merge_other(tk, spec, "massifs")
+                else:
+                    self._merge_other(tk, {}, "massifs")
+            elif elem_family == "linteaux":
+                if dims:
+                    spec = {"b": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1])}
+                    self._merge_other(tk, spec, "linteaux")
+                else:
+                    self._merge_other(tk, {}, "linteaux")
+            elif elem_family == "sablieres":
+                if dims:
+                    spec = {"b": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1])}
+                    self._merge_other(tk, spec, "sablieres")
+                else:
+                    self._merge_other(tk, {}, "sablieres")
+            elif elem_family == "couvertines":
+                if dims:
+                    spec = {"b": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1])}
+                    self._merge_other(tk, spec, "couvertines")
+                else:
+                    self._merge_other(tk, {}, "couvertines")
+            elif elem_family == "longrines":
+                if dims:
+                    spec = {"b": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1])}
+                    self._merge_poutre(tk, spec)
+                else:
+                    self._merge_poutre(tk, {})
+            elif elem_family == "chainages":
+                if dims:
+                    spec = {"b": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1])}
+                    self._merge_poutre(tk, spec)
+                else:
+                    self._merge_poutre(tk, {})
+            elif elem_family in ("contre_forts", "futs", "pieux"):
+                self._merge_other(tk, {}, elem_family)
 
         return n_impl
 
@@ -1744,6 +1892,18 @@ class VectorPlanExtractor:
     def _merge_radier(self, tk, spec):
         """Fusion non destructive pour les radiers."""
         cur = self.global_catalogue["radiers"].setdefault(tk, {})
+        for k, v in spec.items():
+            if k == "ferr_x":
+                cur_v = cur.setdefault(k, {"nb": 0, "phi": 0})
+                if v.get("nb", 0) > 0 and cur_v.get("nb", 0) == 0:
+                    cur[k] = v
+            elif cur.get(k) in (None, 0) or k not in cur:
+                cur[k] = v
+
+    def _merge_other(self, tk, spec, category):
+        """Fusion non destructive pour tous les autres types d'elements."""
+        self.global_catalogue.setdefault(category, {})
+        cur = self.global_catalogue[category].setdefault(tk, {})
         for k, v in spec.items():
             if k == "ferr_x":
                 cur_v = cur.setdefault(k, {"nb": 0, "phi": 0})
