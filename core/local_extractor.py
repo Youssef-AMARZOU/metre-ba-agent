@@ -65,6 +65,28 @@ GROUPED_SQ_RX = re.compile(r"\(\s*(S\d+)\s*,\s*([PQ0O]\d+)\s*\)", re.I)
 AXE_LETTER_RX = re.compile(r"^[A-T]$")
 AXE_NUM_RX = re.compile(r"^(?:[1-9]|1\d|20)$")
 
+# --- EXTENSION : tous les types de elements BA ---
+# Dalles : D1, D2, DAL-1
+DALLE_LABEL_RX = re.compile(r"^(D\d+)$", re.I)
+DALLE_DIM_RX = re.compile(r"^D(\d+)\s*\((\d+)x(\d+)\)$", re.I)
+# Voiles : V1, V2, VOL-1, VOILE 1
+VOILE_LABEL_RX = re.compile(r"^(V\d+)$", re.I)
+VOILE_DIM_RX = re.compile(r"^V(\d+)\s*\((\d+)x(\d+)\)$", re.I)
+# Escaliers : ESC1, ESC-1
+ESCALIER_LABEL_RX = re.compile(r"^(ESC\d+)$", re.I)
+# Longrines : LG1, LG2 (deja dans POUTRE_LABEL_RX)
+# Chainages : CH1, CH2 (deja dans POUTRE_LABEL_RX)
+# Murs : M1, M2
+MUR_LABEL_RX = re.compile(r"^(M\d+)$", re.I)
+# Radiers : R1, R2
+RADIER_LABEL_RX = re.compile(r"^(R\d+)$", re.I)
+# Contre-forts : CF1, CF2
+CF_LABEL_RX = re.compile(r"^(CF\d+)$", re.I)
+# Futs : F1, F2
+FUT_LABEL_RX = re.compile(r"^(F\d+)$", re.I)
+# Pieux : PIE1, PIEU-1
+PIEU_LABEL_RX = re.compile(r"^(PIE\d+)$", re.I)
+
 # Cartouche standard R+2 marocain (documente) : applique UNIQUEMENT
 # lorsqu'un type Qx existe mais que le parseur automatique n'a rien lu
 # (dictionnaire vide). Chaque application est tracee en hypothese.
@@ -295,9 +317,17 @@ class VectorPlanExtractor:
     """
 
     def __init__(self):
-        self.global_catalogue = {"semelles": {}, "poteaux": {}, "poutres": {},
-                                 "semelles_filantes": []}
-        self.implantations = {"semelles": [], "poteaux": [], "poutres": []}
+        self.global_catalogue = {
+            "semelles": {}, "poteaux": {}, "poutres": {},
+            "dalles": {}, "voiles": {}, "escaliers": {},
+            "longrines": {}, "chainages": {}, "murs": {},
+            "radiers": {}, "contre_forts": {}, "futs": {},
+            "semelles_filantes": [],
+        }
+        self.implantations = {
+            "semelles": [], "poteaux": [], "poutres": [],
+            "dalles": [], "voiles": [], "escaliers": [],
+        }
         self.warnings = []
         self.hypotheses = []
         self.pages_tableau = []
@@ -379,9 +409,17 @@ class VectorPlanExtractor:
         return self.extract_from_words(words)
 
     def _reset(self):
-        self.global_catalogue = {"semelles": {}, "poteaux": {}, "poutres": {},
-                                 "semelles_filantes": []}
-        self.implantations = {"semelles": [], "poteaux": [], "poutres": []}
+        self.global_catalogue = {
+            "semelles": {}, "poteaux": {}, "poutres": {},
+            "dalles": {}, "voiles": {}, "escaliers": {},
+            "longrines": {}, "chainages": {}, "murs": {},
+            "radiers": {}, "contre_forts": {}, "futs": {},
+            "semelles_filantes": [],
+        }
+        self.implantations = {
+            "semelles": [], "poteaux": [], "poutres": [],
+            "dalles": [], "voiles": [], "escaliers": [],
+        }
         self.warnings = []
         self.hypotheses = []
         self.pages_tableau = []
@@ -896,6 +934,10 @@ class VectorPlanExtractor:
         - 'SF' / 'SF 45 x 20 x L' (semelle filante)
         - 'S1: Semelle de 90 x 90 x 25'
         - 'Poteau P1 (25x25) ... 6HA14' + 'HA8 St = 14.17'
+        - 'D1' / 'D1(300x400)' / 'Dalle D1'
+        - 'V1' / 'V1(200x15)' / 'Voile V1'
+        - 'ESC1' / 'Escalier ESC1'
+        - Tous les types de elements BA
         Les zones lues sont enregistrees pour exclure les memes mots de la
         grille spatiale (un 'S1' de tableau n'est pas une implantation).
         """
@@ -916,7 +958,7 @@ class VectorPlanExtractor:
                     and not is_spatial_label):
                 tk = decomposition["reference"]
                 spec = {}
-                dimensions = decomposition["dimensions_m"]
+                dimensions = decomposition.get("dimensions")
                 if dimensions:
                     spec.update(dimensions)
                 if decomposition.get("ferr_x"):
@@ -930,9 +972,93 @@ class VectorPlanExtractor:
                     last_type = tk
                     self._nomenclature_line_bands.setdefault(page_num, []).append(
                         (line["x0"], line["y0"], line["x1"], line["y1"]))
-                    # Une nomenclature ne crée jamais une implantation.
-                    if decomposition["dimensions_m"] or decomposition.get("ferr_x"):
+                    if decomposition.get("dimensions") or decomposition.get("ferr_x"):
                         continue
+
+            # --- DALLE ---
+            if decomposition["family"] == "DALLE" and decomposition["reference"]:
+                tk = decomposition["reference"]
+                spec = {}
+                dimensions = decomposition.get("dimensions")
+                if dimensions:
+                    spec.update(dimensions)
+                if decomposition.get("ferr_x"):
+                    spec["ferr_x"] = decomposition["ferr_x"]
+                if spec:
+                    self._merge_dalle(tk, spec)
+                    found = True
+                    last_type = tk
+                    self._nomenclature_line_bands.setdefault(page_num, []).append(
+                        (line["x0"], line["y0"], line["x1"], line["y1"]))
+                    continue
+
+            # --- VOILE ---
+            if decomposition["family"] == "VOILE" and decomposition["reference"]:
+                tk = decomposition["reference"]
+                spec = {}
+                dimensions = decomposition.get("dimensions")
+                if dimensions:
+                    spec.update(dimensions)
+                if decomposition.get("ferr_x"):
+                    spec["ferr_x"] = decomposition["ferr_x"]
+                if spec:
+                    self._merge_voile(tk, spec)
+                    found = True
+                    last_type = tk
+                    self._nomenclature_line_bands.setdefault(page_num, []).append(
+                        (line["x0"], line["y0"], line["x1"], line["y1"]))
+                    continue
+
+            # --- ESCALIER ---
+            if decomposition["family"] == "ESCALIER" and decomposition["reference"]:
+                tk = decomposition["reference"]
+                spec = {}
+                dimensions = decomposition.get("dimensions")
+                if dimensions:
+                    spec.update(dimensions)
+                if decomposition.get("ferr_x"):
+                    spec["ferr_x"] = decomposition["ferr_x"]
+                if spec:
+                    self._merge_escalier(tk, spec)
+                    found = True
+                    last_type = tk
+                    self._nomenclature_line_bands.setdefault(page_num, []).append(
+                        (line["x0"], line["y0"], line["x1"], line["y1"]))
+                    continue
+
+            # --- LONGRINE ---
+            if decomposition["family"] == "LONGRINE" and decomposition["reference"]:
+                tk = decomposition["reference"]
+                spec = {}
+                dimensions = decomposition.get("dimensions")
+                if dimensions:
+                    spec.update(dimensions)
+                if decomposition.get("ferr_x"):
+                    spec["ferr_x"] = decomposition["ferr_x"]
+                if spec:
+                    self._merge_poutre(tk, spec)
+                    found = True
+                    last_type = tk
+                    self._nomenclature_line_bands.setdefault(page_num, []).append(
+                        (line["x0"], line["y0"], line["x1"], line["y1"]))
+                    continue
+
+            # --- CHAINAGE ---
+            if decomposition["family"] == "CHAINAGE" and decomposition["reference"]:
+                tk = decomposition["reference"]
+                spec = {}
+                dimensions = decomposition.get("dimensions")
+                if dimensions:
+                    spec.update(dimensions)
+                if decomposition.get("ferr_x"):
+                    spec["ferr_x"] = decomposition["ferr_x"]
+                if spec:
+                    self._merge_poutre(tk, spec)
+                    found = True
+                    last_type = tk
+                    self._nomenclature_line_bands.setdefault(page_num, []).append(
+                        (line["x0"], line["y0"], line["x1"], line["y1"]))
+                    continue
 
             # Annotation directe : S1: Semelle de 90 x 90 x 25
             for m in SEMELLE_ANNO_RX.finditer(text):
@@ -1067,13 +1193,11 @@ class VectorPlanExtractor:
                 found = True
         return found
     def _extract_spatial_grid_from_page(self, words, page_num):
-        """Axes (lettres/chiffres avec coordonnees) + reperes de semelles
+        """Axes (lettres/chiffres avec coordonnees) + reperes de TOUS les elements
         -> implantations positionnees a l'intersection la plus proche.
 
-        Les mots situes dans une zone de nomenclature deja lue (cellules
-        de tableau find_tables ou lignes textuelles compactes) sont EXCLUS :
-        un 'S1' de tableau n'est pas une implantation ; les etiquettes du
-        plan hors tableau restent exploitees (multi-batiments).
+        Supporte: semelles (S), poteaux (P/Q), poutres (N/B/N/PN/LG/CH),
+        dalles (D), voiles (V), escaliers (ESC).
         """
         regions = (self._nomenclature_bboxes.get(page_num, [])
                    + self._nomenclature_line_bands.get(page_num, []))
@@ -1091,6 +1215,19 @@ class VectorPlanExtractor:
         hits = []           # [(type, dims, x, y)]
         grouped = []        # [(S_rep, Q_rep, x, y)]
 
+        # Patterns for spatial detection of all element types
+        SEM_DIM = re.compile(r"^(S\d+)\((\d+)x(\d+)x(\d+)\)$", re.I)
+        SEM_PLAIN = re.compile(r"^(S\d+)$", re.I)
+        POT_DIM = re.compile(r"^([PQ]\d+)\((\d+)x(\d+)\)$", re.I)
+        POT_PLAIN = re.compile(r"^([PQ]\d+)$", re.I)
+        POUT_DIM = re.compile(r"^((?:B?N\d+(?:BIS)?|PN\d+|LG\d+|CH\d*))\((\d+)x(\d+)\)$", re.I)
+        POUT_PLAIN = re.compile(r"^(B?N\d+(?:BIS)?|PN\d+|LG\d+|CH\d*)$", re.I)
+        DAL_DIM = re.compile(r"^(D\d+)\((\d+)x(\d+)\)$", re.I)
+        DAL_PLAIN = re.compile(r"^(D\d+)$", re.I)
+        VOL_DIM = re.compile(r"^(V\d+)\((\d+)x(\d+)\)$", re.I)
+        VOL_PLAIN = re.compile(r"^(V\d+)$", re.I)
+        ESC_PLAIN = re.compile(r"^(ESC\d+)$", re.I)
+
         for w in words:
             if in_nomenclature(w):
                 continue
@@ -1100,7 +1237,6 @@ class VectorPlanExtractor:
             if mg:
                 s_rep = mg.group(1).upper()
                 raw_q = mg.group(2).upper()
-                # Remplacement tolerant OCR : '04' ou 'O4' -> 'Q4'
                 q_rep = re.sub(r"^[0O]", "Q", raw_q)
                 grouped.append((s_rep, q_rep, w["x"], w["y"]))
                 continue
@@ -1110,16 +1246,66 @@ class VectorPlanExtractor:
                 axes_numbers.append((t, w["y"]))
             else:
                 tc = t.replace(" ", "")
-                m = SEMELLE_DIM_RX.match(tc)
+                # Semelles with dimensions
+                m = SEM_DIM.match(tc)
                 if m:
-                    hits.append((f"S{m.group(1)}",
-                                 (int(m.group(2)), int(m.group(3)),
-                                  int(m.group(4))),
+                    hits.append((m.group(1).upper(),
+                                 (int(m.group(2)), int(m.group(3)), int(m.group(4))),
                                  w["x"], w["y"]))
                     continue
-                m = SEMELLE_PLAIN_RX.match(t)
+                m = SEM_PLAIN.match(t)
                 if m:
-                    hits.append((f"S{m.group(1)}", None, w["x"], w["y"]))
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Poteaux with dimensions
+                m = POT_DIM.match(tc)
+                if m:
+                    hits.append((m.group(1).upper(),
+                                 (int(m.group(2)), int(m.group(3)), None),
+                                 w["x"], w["y"]))
+                    continue
+                m = POT_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Poutres with dimensions
+                m = POUT_DIM.match(tc)
+                if m:
+                    hits.append((m.group(1).upper(),
+                                 (int(m.group(2)), int(m.group(3)), None),
+                                 w["x"], w["y"]))
+                    continue
+                m = POUT_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Dalles
+                m = DAL_DIM.match(tc)
+                if m:
+                    hits.append((m.group(1).upper(),
+                                 (int(m.group(2)), int(m.group(3)), None),
+                                 w["x"], w["y"]))
+                    continue
+                m = DAL_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Voiles
+                m = VOL_DIM.match(tc)
+                if m:
+                    hits.append((m.group(1).upper(),
+                                 (int(m.group(2)), int(m.group(3)), None),
+                                 w["x"], w["y"]))
+                    continue
+                m = VOL_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Escaliers
+                m = ESC_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
 
         # Memoriser les axes de la page (positions poteaux a la finalisation)
         if grouped or hits:
@@ -1158,20 +1344,71 @@ class VectorPlanExtractor:
                 if axes_letters else ""
             file = min(axes_numbers, key=lambda n: abs(n[1] - y))[0] \
                 if axes_numbers else ""
-            self.implantations["semelles"].append({
+
+            # Classify element type from label prefix
+            upper = tk.upper()
+            if upper.startswith("S"):
+                elem_family = "semelles"
+            elif upper.startswith(("P", "Q")):
+                elem_family = "poteaux"
+            elif upper.startswith(("N", "BN", "PN", "LG", "CH")):
+                elem_family = "poutres"
+            elif upper.startswith("D"):
+                elem_family = "dalles"
+            elif upper.startswith("V"):
+                elem_family = "voiles"
+            elif upper.startswith("ESC"):
+                elem_family = "escaliers"
+            else:
+                elem_family = "semelles"  # fallback
+
+            self.implantations.setdefault(elem_family, []).append({
                 "id": f"{tk}_{self._sem_counter[tk]}",
                 "type": tk,
                 "axe": axe,
                 "file": file,
             })
             n_impl += 1
-            # Dimensions lues directement sur l'etiquette du plan
-            if dims:
-                spec = {}
-                spec["a"] = _dim_cm_to_m(dims[0])
-                spec["b"] = _dim_cm_to_m(dims[1])
-                spec["h"] = _dim_cm_to_m(dims[2])
-                self._merge_semelle(tk, spec)
+
+            # Register in catalogue
+            if elem_family == "semelles":
+                if dims:
+                    spec = {"a": _dim_cm_to_m(dims[0]),
+                            "b": _dim_cm_to_m(dims[1]),
+                            "h": _dim_cm_to_m(dims[2]) if dims[2] else None}
+                    self._merge_semelle(tk, spec)
+                else:
+                    self._merge_semelle(tk, {})
+            elif elem_family == "poteaux":
+                if dims:
+                    spec = {"a": _dim_cm_to_m(dims[0]),
+                            "b": _dim_cm_to_m(dims[1])}
+                    self._merge_poteau(tk, spec)
+                else:
+                    self._merge_poteau(tk, {})
+            elif elem_family == "poutres":
+                if dims:
+                    spec = {"b": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1])}
+                    self._merge_poutre(tk, spec)
+                else:
+                    self._merge_poutre(tk, {})
+            elif elem_family == "dalles":
+                if dims:
+                    spec = {"ep": _dim_cm_to_m(dims[0])}
+                    self._merge_dalle(tk, spec)
+                else:
+                    self._merge_dalle(tk, {})
+            elif elem_family == "voiles":
+                if dims:
+                    spec = {"ep": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1]) if dims[1] else None}
+                    self._merge_voile(tk, spec)
+                else:
+                    self._merge_voile(tk, {})
+            elif elem_family == "escaliers":
+                self._merge_escalier(tk, {})
+
         return n_impl
 
     # ------------------------------------------------------------------
@@ -1435,6 +1672,39 @@ class VectorPlanExtractor:
             elif cur.get(k) in (None, 0) or k not in cur:
                 cur[k] = v
 
+    def _merge_dalle(self, tk, spec):
+        """Fusion non destructive pour les dalles."""
+        cur = self.global_catalogue["dalles"].setdefault(tk, {})
+        for k, v in spec.items():
+            if k == "ferr_x":
+                cur_v = cur.setdefault(k, {"nb": 0, "phi": 0})
+                if v.get("nb", 0) > 0 and cur_v.get("nb", 0) == 0:
+                    cur[k] = v
+            elif cur.get(k) in (None, 0) or k not in cur:
+                cur[k] = v
+
+    def _merge_voile(self, tk, spec):
+        """Fusion non destructive pour les voiles."""
+        cur = self.global_catalogue["voiles"].setdefault(tk, {})
+        for k, v in spec.items():
+            if k == "ferr_x":
+                cur_v = cur.setdefault(k, {"nb": 0, "phi": 0})
+                if v.get("nb", 0) > 0 and cur_v.get("nb", 0) == 0:
+                    cur[k] = v
+            elif cur.get(k) in (None, 0) or k not in cur:
+                cur[k] = v
+
+    def _merge_escalier(self, tk, spec):
+        """Fusion non destructive pour les escaliers."""
+        cur = self.global_catalogue["escaliers"].setdefault(tk, {})
+        for k, v in spec.items():
+            if k == "ferr_x":
+                cur_v = cur.setdefault(k, {"nb": 0, "phi": 0})
+                if v.get("nb", 0) > 0 and cur_v.get("nb", 0) == 0:
+                    cur[k] = v
+            elif cur.get(k) in (None, 0) or k not in cur:
+                cur[k] = v
+
     # ------------------------------------------------------------------
     # Finalisation
     # ------------------------------------------------------------------
@@ -1535,7 +1805,7 @@ class VectorPlanExtractor:
                 self.warnings.append(
                     f"{tk}: Armatures non cotées dans la table (à vérifier "
                     f"sur coupes) — dimensions {a:.2f}x{b:.2f}x"
-                    f"{spec.get('h', 0):.2f} m conservées pour les volumes.")
+                    f"{(spec.get('h') or 0):.2f} m conservees pour les volumes.")
 
         # Semelles filantes : tracees mais non metrees automatiquement
         # (longueur non cotee sur le plan — aucune valeur inventee).
