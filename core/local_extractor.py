@@ -1227,6 +1227,8 @@ class VectorPlanExtractor:
         VOL_DIM = re.compile(r"^(V\d+)\((\d+)x(\d+)\)$", re.I)
         VOL_PLAIN = re.compile(r"^(V\d+)$", re.I)
         ESC_PLAIN = re.compile(r"^(ESC\d+)$", re.I)
+        MUR_PLAIN = re.compile(r"^(M\d+)$", re.I)
+        RADIER_PLAIN = re.compile(r"^(R\d+)$", re.I)
 
         for w in words:
             if in_nomenclature(w):
@@ -1303,6 +1305,16 @@ class VectorPlanExtractor:
                     continue
                 # Escaliers
                 m = ESC_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Murs
+                m = MUR_PLAIN.match(t)
+                if m:
+                    hits.append((m.group(1).upper(), None, w["x"], w["y"]))
+                    continue
+                # Radiers
+                m = RADIER_PLAIN.match(t)
                 if m:
                     hits.append((m.group(1).upper(), None, w["x"], w["y"]))
                     continue
@@ -1408,6 +1420,19 @@ class VectorPlanExtractor:
                     self._merge_voile(tk, {})
             elif elem_family == "escaliers":
                 self._merge_escalier(tk, {})
+            elif elem_family == "murs":
+                if dims:
+                    spec = {"ep": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1]) if dims[1] else None}
+                    self._merge_mur(tk, spec)
+                else:
+                    self._merge_mur(tk, {})
+            elif elem_family == "radiers":
+                if dims:
+                    spec = {"ep": _dim_cm_to_m(dims[0])}
+                    self._merge_radier(tk, spec)
+                else:
+                    self._merge_radier(tk, {})
 
         return n_impl
 
@@ -1697,6 +1722,28 @@ class VectorPlanExtractor:
     def _merge_escalier(self, tk, spec):
         """Fusion non destructive pour les escaliers."""
         cur = self.global_catalogue["escaliers"].setdefault(tk, {})
+        for k, v in spec.items():
+            if k == "ferr_x":
+                cur_v = cur.setdefault(k, {"nb": 0, "phi": 0})
+                if v.get("nb", 0) > 0 and cur_v.get("nb", 0) == 0:
+                    cur[k] = v
+            elif cur.get(k) in (None, 0) or k not in cur:
+                cur[k] = v
+
+    def _merge_mur(self, tk, spec):
+        """Fusion non destructive pour les murs."""
+        cur = self.global_catalogue["murs"].setdefault(tk, {})
+        for k, v in spec.items():
+            if k == "ferr_x":
+                cur_v = cur.setdefault(k, {"nb": 0, "phi": 0})
+                if v.get("nb", 0) > 0 and cur_v.get("nb", 0) == 0:
+                    cur[k] = v
+            elif cur.get(k) in (None, 0) or k not in cur:
+                cur[k] = v
+
+    def _merge_radier(self, tk, spec):
+        """Fusion non destructive pour les radiers."""
+        cur = self.global_catalogue["radiers"].setdefault(tk, {})
         for k, v in spec.items():
             if k == "ferr_x":
                 cur_v = cur.setdefault(k, {"nb": 0, "phi": 0})
