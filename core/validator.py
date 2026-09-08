@@ -100,7 +100,7 @@ class PlanSanityValidator:
           structural n'est detecte (zero mock, mais pas de blocage pre-flight).
         """
         try:
-            with fitz.open(path) as doc:
+            with fitz.open(str(path)) as doc:
                 n_pages = len(doc)
                 if n_pages == 0:
                     return True, (

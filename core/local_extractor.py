@@ -329,7 +329,7 @@ class VectorPlanExtractor:
         import pymupdf
 
         self._reset()
-        with pymupdf.open(pdf_path) as doc:
+        with pymupdf.open(str(pdf_path)) as doc:
             self._current_doc = doc
             self.total_pages = len(doc)
             for idx in range(self.total_pages):
@@ -1656,7 +1656,7 @@ class RasterPlanExtractor:
         import pymupdf
 
         all_words = []
-        with pymupdf.open(pdf_path) as doc:
+        with pymupdf.open(str(pdf_path)) as doc:
             total = len(doc)
             for idx in range(total):
                 from core.pdf_render import render_page_adaptive
@@ -1679,7 +1679,7 @@ def is_raster_pdf(pdf_path):
     """True si le PDF ne contient pas (ou presque) de texte extractible."""
     import pymupdf
     try:
-        with pymupdf.open(pdf_path) as doc:
+        with pymupdf.open(str(pdf_path)) as doc:
             for page in doc:
                 if len(page.get_text().strip()) > 100:
                     return False
