@@ -22,7 +22,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from core.tokenizer import expand_words
+from core.tokenizer import decompose_etiquette_technique, expand_words
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 logger = logging.getLogger(__name__)
@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 SEMELLE_DIM_RX = re.compile(r"^S(\d+)\s*\((\d+)x(\d+)x(\d+)\)$", re.I)
 SEMELLE_PLAIN_RX = re.compile(r"^S(\d+)$", re.I)
+# Plan label with embedded triplet: 'S4(150x150x40)' — n'importe ou dans
+# la ligne, avec ou sans espaces.  Utilise pour exclure les annotations
+# plan de `_appliquer_decompose_ligne` (ne traite que le tableau).
+PLAN_SEMELLE_DIM_RE = re.compile(r"S\d+\s*\(\s*\d+\s*x\s*\d+\s*x\s*\d+\s*\)", re.I)
 # Conventions marocaines : poteaux prefixes P (classique) ou Q (Q1..Q4)
 POTEAU_LABEL_RX = re.compile(r"^([PQ]\d+)$", re.I)
 POTEAU_DIM_RX = re.compile(r"^\((\d+)x(\d+)\)$")
@@ -191,6 +195,94 @@ def _dedupe_bars(bars):
 # ============================================================================
 
 class VectorPlanExtractor:
+
+    # --- PONT DE COMPATIBILITÉ POUR LES TESTS UNITAIRES ---
+    @staticmethod
+    def _normaliser_repere_semelle(rep):
+        """'SEMELLE 1' / 'S1' -> 'S1' (None sinon)."""
+        if not rep:
+            return None
+        m = re.search(r"S\D*(\d+)", str(rep).strip().upper())
+        return f"S{m.group(1)}" if m else None
+
+    @staticmethod
+    def _normaliser_repere_poteau(rep):
+        """'POTEAU 2' / 'P1' / 'Q4' -> 'P2' / 'P1' / 'Q4' (None sinon)."""
+        if not rep:
+            return None
+        m = re.search(r"([PQ])\D*(\d+)", str(rep).strip().upper())
+        return f"{m.group(1)}{m.group(2)}" if m else None
+
+    def _appliquer_decompose_ligne(self, text, line, page_num):
+        """Applique decompose_etiquette_technique() (core/tokenizer.py).
+
+        Gardes zero-mock strictes :
+        - lignes-plan 'S\\d+(...)' ignorees : traitees par la grille
+          spatiale (ni bande d'exclusion, ni found) ;
+        - dims converties par seuil cm->m (_cm_triplet_to_m, pas de /100
+          aveugle) et seulement si le type n'a pas encore de dimensions ;
+        - acier accepte seulement avec un vrai nombre de barres (nb non
+          None, jamais de nb=1 invente) et un diametre plausible 5..40 mm.
+        Retourne True si une donnee nouvelle a ete enregistree (avec
+        bande d'exclusion pour la grille spatiale).
+        """
+        # Plan labels contain 'S4(150x150x40)' with dims — never process
+        # these here (they belong to the spatial grid / text detector).
+        if SEMELLE_DIM_RX.search(text.replace(" ", "")):
+            return False
+        if PLAN_SEMELLE_DIM_RE.search(text):
+            return False
+        deco = decompose_etiquette_technique(text)
+        if not deco:
+            return False
+        enregistre = False
+
+        dim = deco.get("dimensions") or {}
+        tk_s = self._normaliser_repere_semelle(deco.get("semelle"))
+        if tk_s and dim.get("a") and dim.get("b"):
+            # Page toujours tracee (agregation multi-batiments),
+            # specs seulement si manquantes (fusion non destructive).
+            pages = self._semelles_pages.setdefault(tk_s, [])
+            if page_num not in pages:
+                pages.append(page_num)
+            cur = self.global_catalogue["semelles"].get(tk_s, {})
+            if not cur.get("a"):
+                a, b, h = _cm_triplet_to_m(
+                    [dim["a"], dim["b"], dim.get("h") or 0])
+                spec = {"a": a, "b": b}
+                if dim.get("h"):
+                    spec["h"] = h
+                self._register_semelle_type(
+                    tk_s, spec.get("a", 0), spec.get("b", 0),
+                    spec.get("h", 0), page_num)
+                enregistre = True
+
+        tk_p = self._normaliser_repere_poteau(deco.get("poteau"))
+        if tk_p and dim.get("a") and dim.get("b"):
+            cur = self.global_catalogue["poteaux"].get(tk_p, {})
+            if "a" not in cur:
+                a, b = _cm_triplet_to_m([dim["a"], dim["b"]])
+                self._merge_poteau(tk_p, {"a": a, "b": b})
+                enregistre = True
+
+        acier = deco.get("acier") or {}
+        nb, phi = acier.get("nb"), acier.get("phi")
+        if nb is not None and phi is not None and 5 <= phi <= 40:
+            if tk_s:
+                cur = self.global_catalogue["semelles"].get(tk_s, {})
+                if cur.get("ferr_x", {}).get("nb", 0) == 0:
+                    self._merge_semelle(
+                        tk_s, {"ferr_x": {"nb": nb, "phi": phi},
+                               "ferr_y": {"nb": nb, "phi": phi}})
+                    self.warnings.append(
+                        f"{tk_s}: ferraillage lu par decodeur universel "
+                        f"({nb}HA{phi}) — a verifier sur coupes.")
+                    enregistre = True
+
+        if enregistre:
+            self._nomenclature_line_bands.setdefault(page_num, []).append(
+                (line["x0"], line["y0"], line["x1"], line["y1"]))
+        return enregistre
     """Extraction vectorielle locale de plans BA, multi-pages (1 a 1000+).
 
     Usage :
@@ -330,9 +422,10 @@ class VectorPlanExtractor:
 
         words = expand_words(words)
         # Fallback OCR ciblé : texte vectoriel toujours conservé, OCR ajouté
-        # uniquement pour les pages contenant des images et peu de texte.
+        # uniquement pour les pages contenant une VRAIE image scannee
+        # (>= 0,5 Mpx, pas un logo) et peu de texte.
         # Les plans vectoriels (>= 15 mots) ne declenchent JAMAIS l'OCR.
-        has_image = bool(page.get_images(full=True))
+        has_image = self.ocr_engine._has_scan_image(page)
         has_structural_token = any(
             SEMELLE_PLAIN_RX.match(w["text"])
             or POTEAU_LABEL_RX.match(w["text"])
@@ -936,6 +1029,11 @@ class VectorPlanExtractor:
                 elif last_type:
                     self.ferra_annotations.append(
                         (last_type, phi, st, page_num))
+
+            # Decodeur universel en dernier recours : ne remplit que
+            # les donnees encore manquantes (jamais d'ecrasement).
+            if self._appliquer_decompose_ligne(text, line, page_num):
+                found = True
         return found
     def _extract_spatial_grid_from_page(self, words, page_num):
         """Axes (lettres/chiffres avec coordonnees) + reperes de semelles

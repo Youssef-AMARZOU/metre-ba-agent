@@ -18,7 +18,7 @@ import openpyxl
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEMPLATE_REPO = os.path.join(ROOT, "output", "modele_metre_BA.xlsx")
+TEMPLATE_REPO = os.path.join(ROOT, "templates", "modele_metre_BA.xlsx")
 
 PLAN_RICHE = {
     "projet": {"nom": "Projet Pont Test", "date": None},

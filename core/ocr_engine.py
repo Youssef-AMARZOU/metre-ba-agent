@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 OCR_MIN_WORDS = 15
 OCR_DPI = 200
 OCR_TIMEOUT_SECONDS = 30
+# Taille image minimale (pixels) pour qualifier un vrai plan scanne.
+# Un scan A4 a 150 dpi ~= 2,2 Mpx ; logos/icones << 100 kpx.
+OCR_MIN_IMAGE_PIXELS = 500_000
 
 
 class PlanOCREngine:
@@ -75,6 +78,21 @@ class PlanOCREngine:
         except Exception:
             return False
 
+    @staticmethod
+    def _has_scan_image(page) -> bool:
+        """True si la page contient une image ASSEZ GRANDE pour etre un
+        plan scanne (pas un simple logo/icone). Garde-fou contre l'OCR
+        inutile des pages de garde riches en texte vectoriel."""
+        try:
+            for im in page.get_images(full=True):
+                if len(im) > 3:
+                    w, h = im[2] or 0, im[3] or 0
+                    if w * h >= OCR_MIN_IMAGE_PIXELS:
+                        return True
+        except Exception:
+            pass
+        return False
+
     def ocr_page_if_scanned(self, page, min_words: int = None,
                             force: bool = False) -> list:
         """OCR paresseux d'une page PyMuPDF.
@@ -92,7 +110,7 @@ class PlanOCREngine:
             vector_words = []
         if len(vector_words) >= seuil and not force:
             return []
-        if not self._looks_scanned(page):
+        if not self._has_scan_image(page):
             return []
 
         engine = self._ensure_engine()
