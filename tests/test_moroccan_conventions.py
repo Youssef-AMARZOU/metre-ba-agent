@@ -189,16 +189,18 @@ class TestPoutresMarocaines:
         assert pou["b"] == 0.20 and pou["h"] == 0.35
 
     def test_repere_isole_lg_ch_sans_section(self):
-        """LG1 / CH sans section lue : types conserves avec flag
-        'dimensions_manquantes' (jamais supprimes silencieusement)."""
+        """LG1 / CH sans section lue : types conserves dans les bons catalogues
+        (longrines/chainages) avec flag 'dimensions_manquantes'."""
         ex = VectorPlanExtractor()
         words = [{"text": "LG1", "x": 100, "y": 100, "page": 1},
                  {"text": "CH", "x": 250, "y": 100, "page": 1},
                  {"text": "S1(90x90x25)", "x": 400, "y": 300, "page": 1}]
         data = ex.extract_from_words(words)
-        pou = data["catalogue_types"]["poutres"]
-        assert pou["LG1"]["dimensions_manquantes"] is True
-        assert pou["CH"]["dimensions_manquantes"] is True
+        cat = data["catalogue_types"]
+        lg = cat.get("longrines", {})
+        ch = cat.get("chainages", {})
+        assert lg.get("LG1", {}).get("dimensions_manquantes") is True
+        assert ch.get("CH", {}).get("dimensions_manquantes") is True
 
 
 # ============================================================================

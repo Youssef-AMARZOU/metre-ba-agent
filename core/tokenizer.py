@@ -368,7 +368,7 @@ def decompose_etiquette_technique(texte: Any) -> dict:
         m_pot = re.search(r"\b([PQ]\d+)\b", txt, re.IGNORECASE)
     if not m_pou:
         m_pou = re.search(
-            r"\b(B?N\d+(?:BIS)?|PN\d+|LG\d+|CH\d*|BT\d+|DB\d*)\b",
+            r"\b(B?N\d+(?:BIS)?|PN\d+|LG\d+|CH\d+|BT\d+|DB\d*)\b",
             txt, re.IGNORECASE,
         )
     if not m_dal:
@@ -376,7 +376,19 @@ def decompose_etiquette_technique(texte: Any) -> dict:
     if not m_vol:
         m_vol = re.search(r"\b(V\d+)\b", txt, re.IGNORECASE)
     if not m_esc:
-        m_esc = re.search(r"\b(ESC\d+)\b", txt, re.IGNORECASE)
+        m_esc = re.search(r"\b(ESC\d*)\b", txt, re.IGNORECASE)
+
+    # Bare N-(dims): N-(25X45)ALL
+    if not m_pou and not elements["family"]:
+        m_bare_n = re.search(r"\b(N)\s*[-–]\s*\(", txt, re.IGNORECASE)
+        if m_bare_n:
+            elements["family"] = "POUTRE"
+            elements["reference"] = "N"
+            elements["poutre"] = "N"
+
+    # R1, M1 in short labels
+    m_rad = None if elements["family"] else re.search(r"\b(R\d+)\b", txt, re.IGNORECASE)
+    m_mur = None if elements["family"] else re.search(r"\b(M\d+)\b", txt, re.IGNORECASE)
 
     # Priorite : semelle > poteau > poutre > dalle > voile > escalier
     if m_sem:
@@ -409,6 +421,54 @@ def decompose_etiquette_technique(texte: Any) -> dict:
         elements["family"] = "ESCALIER"
         elements["reference"] = ref
         elements["escalier"] = ref
+    elif m_rad:
+        ref = m_rad.group(1).upper() if m_rad.lastindex else m_rad.group(0).upper()
+        elements["family"] = "RADIER"
+        elements["reference"] = ref
+    elif m_mur:
+        ref = m_mur.group(1).upper() if m_mur.lastindex else m_mur.group(0).upper()
+        elements["family"] = "MUR"
+        elements["reference"] = ref
+
+    # Bare prefix + dims: LG-(25X35), BN-(25X30), CH-(40X20), PR-(25X40), N-(25X45)
+    m_bare_pou = re.search(r"\b(BN|LG|CH|PR|LT|PA)\s*[-–]\s*\(", txt, re.IGNORECASE)
+    if m_bare_pou and not elements["family"]:
+        prefix = m_bare_pou.group(1).upper()
+        if prefix == "LG":
+            elements["family"] = "LONGRINE"
+            elements["reference"] = prefix
+        elif prefix == "BN":
+            elements["family"] = "BANDE_NOYEE"
+            elements["reference"] = prefix
+        elif prefix == "CH":
+            elements["family"] = "CHAINAGE"
+            elements["reference"] = prefix
+        elif prefix == "PR":
+            elements["family"] = "POUTRE_REDOUBLANTE"
+            elements["reference"] = prefix
+        elif prefix == "LT":
+            elements["family"] = "LINTEAU"
+            elements["reference"] = prefix
+        elif prefix == "PA":
+            elements["family"] = "POUTRE_APPUI"
+            elements["reference"] = prefix
+
+    # Bare prefix + dims without parens: LG-25x35-, BN-25x20-
+    m_bare_pou2 = re.search(r"\b(BN|LG|CH|PR|LT|PA)\s*[-–]\s*\d+\s*[xX*]\s*\d+", txt, re.IGNORECASE)
+    if m_bare_pou2 and not elements["family"]:
+        prefix = m_bare_pou2.group(1).upper()
+        if prefix == "LG":
+            elements["family"] = "LONGRINE"
+            elements["reference"] = prefix
+        elif prefix == "BN":
+            elements["family"] = "BANDE_NOYEE"
+            elements["reference"] = prefix
+        elif prefix == "CH":
+            elements["family"] = "CHAINAGE"
+            elements["reference"] = prefix
+        elif prefix == "PR":
+            elements["family"] = "POUTRE_REDOUBLANTE"
+            elements["reference"] = prefix
 
     # 2. Dimensions
     dim_match = _DIMENSIONS.search(txt)

@@ -121,6 +121,20 @@ COLORS = {
 # Widget personnalisé : Zone de dépôt
 # ============================================================================
 
+
+import json
+import dataclasses
+
+class PlanBAEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if dataclasses.is_dataclass(obj):
+            return dataclasses.asdict(obj)
+        if hasattr(obj, "to_dict"):
+            return obj.to_dict()
+        if hasattr(obj, "__dict__"):
+            return obj.__dict__
+        return str(obj)
+
 class DropZone(ctk.CTkFrame):
     """Zone de dépôt de fichier avec sélection par bouton."""
 
@@ -435,6 +449,184 @@ class SummaryTable(ctk.CTkFrame):
 
 
 # ============================================================================
+# Panneau Rapport Metier (regles metier genie civil)
+# ============================================================================
+
+class RapportMetierPanel(ctk.CTkFrame):
+    """Panneau d'affichage du rapport metier complet.
+
+    Affiche : ecarts plan/tableaux, lineaires, volumes beton,
+    hypotheses reglementaires, sections sans ferraillage, revision.
+    """
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        self.configure(fg_color=COLORS["bg_card"], corner_radius=10)
+
+        self.label_title = ctk.CTkLabel(
+            self, text="🏗️ Rapport Métier — Génie Civil / Béton Armé",
+            font=ctk.CTkFont(size=14, weight="bold"))
+        self.label_title.pack(anchor="w", padx=15, pady=(10, 5))
+
+        self.textbox = ctk.CTkTextbox(
+            self, height=300,
+            font=ctk.CTkFont(family="Consolas", size=10),
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["text_muted"],
+            wrap="word")
+        self.textbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+    def update_from_data(self, data: dict):
+        """Met a jour le panneau avec les donnees du rapport metier."""
+        meta = data.get("_meta", {})
+        rapport = meta.get("rapport_metier")
+        text_analysis = meta.get("text_analysis", {})
+
+        lines: list[str] = []
+
+        # En-tete revision
+        if rapport:
+            if rapport.get("revision_index"):
+                lines.append(f"Indice : {rapport['revision_index']}")
+            if rapport.get("revision_date"):
+                lines.append(f"Date   : {rapport['revision_date']}")
+            if rapport.get("revision_label"):
+                lines.append(f"Label  : {rapport['revision_label']}")
+            lines.append("")
+
+        # Hypotheses reglementaires
+        if rapport and rapport.get("regulatory_hypotheses"):
+            lines.append("--- HYPOTHÈSES RÉGLEMENTAIRES ---")
+            seen = set()
+            for h in rapport["regulatory_hypotheses"]:
+                key = (h["category"], h["value"])
+                if key not in seen:
+                    seen.add(key)
+                    lines.append(f"  {h['category']}: {h['value']}")
+            lines.append("")
+
+        # Ecarts plan/tableaux
+        if rapport and rapport.get("discrepancies"):
+            lines.append("--- ÉCARTS PLAN / TABLEAUX RÉCAPITULATIFS ---")
+            for d in rapport["discrepancies"]:
+                marker = "!!!" if d["severity"] == "ERROR" else "! " if d["severity"] == "WARNING" else "  "
+                lines.append(
+                    f"{marker}{d['family']} ({d['prefix']}): "
+                    f"plan={d['plan_count']} rep., tableau={d['table_count']} lignes"
+                )
+                if d.get("missing_in_table"):
+                    lines.append(
+                        f"    Absents du tableau : {', '.join(d['missing_in_table'][:10])}")
+                if d.get("missing_in_plan"):
+                    lines.append(
+                        f"    Absents du plan : {', '.join(d['missing_in_plan'][:10])}")
+            lines.append("")
+
+        # Lineaire par type
+        if rapport and rapport.get("linears"):
+            lines.append("--- LINÉAIRE PAR TYPE ---")
+            header = f"  {'Ref':<10} {'Famille':<18} {'Section':<12} {'Niveau':<12} {'Nb':<5} {'Total.m':<8}"
+            lines.append(header)
+            lines.append("  " + "-" * 70)
+            for lin in rapport["linears"]:
+                sec = f"{lin['section_cm'][0]}x{lin['section_cm'][1]}" if lin.get("section_cm") else "-"
+                total = lin["length_m"] * lin["count"]
+                lines.append(
+                    f"  {lin['reference']:<10} {lin['family']:<18} {sec:<12} "
+                    f"{lin['level']:<12} {lin['count']:<5} {total:<8.2f}"
+                )
+            lines.append("")
+
+        # Volume beton
+        if rapport and rapport.get("concrete_volumes"):
+            lines.append("--- VOLUME BÉTON ESTIMÉ ---")
+            total_vol = 0.0
+            for cv in rapport["concrete_volumes"]:
+                if cv.get("volume_m3", 0) > 0:
+                    sec = f"{cv['section_cm'][0]}x{cv['section_cm'][1]}" if cv.get("section_cm") else "-"
+                    lines.append(
+                        f"  {cv['reference']:<10} {cv['family']:<18} {sec:<12} "
+                        f"{cv['level']:<12} {cv['count']}x{cv['length_m']:.1f}m = {cv['volume_m3']:.3f} m3"
+                    )
+                    total_vol += cv["volume_m3"]
+            lines.append(f"  {'TOTAL':.<52} {total_vol:.3f} m3")
+            lines.append("")
+
+        # Ferraillage manquant
+        if rapport and rapport.get("missing_ferraillage"):
+            lines.append("--- SECTIONS SANS DÉTAIL DE FERRAILLAGE ---")
+            for mf in rapport["missing_ferraillage"]:
+                lines.append(
+                    f"  ! {mf['reference']} ({mf['family']}) section {mf['section_text']} "
+                    f"- niveau {mf['level']}")
+            lines.append("")
+
+        # Text analysis summary
+        if text_analysis and not text_analysis.get("error"):
+            lines.append("--- ANALYSE PROFONDE DU TEXTE ---")
+            lines.append(f"  Backend : {text_analysis.get('extraction_backend', '?')}")
+            lines.append(f"  Textes inversés corrigés : {text_analysis.get('reversed_texts_corrected', 0)}")
+            lines.append(f"  Éléments cartouche exclus : {text_analysis.get('cartouche_excluded', 0)}")
+            levels = text_analysis.get("levels_detected", [])
+            if levels:
+                lines.append(f"  Niveaux détectés : {', '.join(levels)}")
+            ambig = text_analysis.get("ambiguous_cases", [])
+            if ambig:
+                lines.append(f"  Cas ambigus : {len(ambig)}")
+                for ac in ambig[:5]:
+                    lines.append(f"    - {ac['text']}: {ac['reason']}")
+            lines.append("")
+
+        # Geometry analysis (dessins vectoriels)
+        geometry_analysis = meta.get("geometry_analysis", {})
+        if geometry_analysis and not geometry_analysis.get("error"):
+            lines.append("--- ANALYSE GÉOMÉTRIQUE (DESSINS) ---")
+            lines.append(f"  Formes détectées : {geometry_analysis.get('total_shapes', 0)}")
+            by_fam = geometry_analysis.get("by_family", {})
+            if by_fam:
+                for fam, count in by_fam.items():
+                    lines.append(f"    {fam}: {count}")
+            lines.append("")
+
+        # Level clustering (clustering spatial par niveau)
+        level_clustering = meta.get("level_clustering", {})
+        if level_clustering and not level_clustering.get("error"):
+            lines.append("--- CLUSTERING SPATIAL PAR NIVEAU ---")
+            lines.append(f"  Confiance : {level_clustering.get('confidence', 0):.0%}")
+            zones = level_clustering.get("zones", [])
+            if zones:
+                for z in zones:
+                    if z.get("count", 0) > 0:
+                        lines.append(f"    {z['level']}: {z['count']} éléments")
+            ambig_lc = level_clustering.get("ambiguous", [])
+            if ambig_lc:
+                lines.append(f"  Cas ambigus : {len(ambig_lc)}")
+            lines.append("")
+
+        # Avertissements
+        all_warnings = []
+        if rapport:
+            all_warnings.extend(rapport.get("warnings", []))
+        meta_warnings = meta.get("avertissements", [])
+        all_warnings.extend(meta_warnings)
+        if all_warnings:
+            lines.append("--- AVERTISSEMENTS ---")
+            for w in all_warnings[:15]:
+                lines.append(f"  [!] {w}")
+            if len(all_warnings) > 15:
+                lines.append(f"  ... et {len(all_warnings) - 15} autres avertissements")
+
+        if not lines:
+            lines.append("Aucun rapport métier disponible.")
+            lines.append("Le rapport sera généré après extraction d'un plan PDF.")
+
+        self.textbox.configure(state="normal")
+        self.textbox.delete("1.0", "end")
+        self.textbox.insert("1.0", "\n".join(lines))
+        self.textbox.configure(state="disabled")
+
+
+# ============================================================================
 # Fenêtre principale
 # ============================================================================
 
@@ -562,6 +754,10 @@ class PlanBAMetreApp(*_DND_BASES):
         self.summary_table = SummaryTable(self.main_frame)
         self.summary_table.pack(fill="x", pady=(0, 15))
 
+        # 5b. Rapport métier
+        self.rapport_metier = RapportMetierPanel(self.main_frame, height=350)
+        self.rapport_metier.pack(fill="x", pady=(0, 15))
+
         # 6. Boutons d'action finaux
         actions_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         actions_frame.pack(fill="x")
@@ -586,6 +782,17 @@ class PlanBAMetreApp(*_DND_BASES):
             hover_color="#444444",
             command=self._open_output_folder)
         self.btn_open_folder.pack(side="left", expand=True, fill="x")
+
+        self.btn_correct = ctk.CTkButton(
+            actions_frame,
+            text="✏️  Corriger les elements",
+            font=ctk.CTkFont(size=12),
+            height=36,
+            fg_color=COLORS["warning"],
+            hover_color="#E0A800",
+            state="disabled",
+            command=self._open_correction)
+        self.btn_correct.pack(side="left", padx=(10, 0), expand=True, fill="x")
 
         # 7. Zone de log
         self.log_text = ctk.CTkTextbox(
@@ -745,8 +952,32 @@ class PlanBAMetreApp(*_DND_BASES):
             from core.local_extractor import verifier_livrables_ou_lever
             verifier_livrables_ou_lever(self.plan_data)
 
+            # --- PHASE CORRECTION : Afficher la vue de correction ---
             self.after(0, lambda: self.progress_panel.set_step(
-                "2/5 : Calcul déterministe des métrés et ferraillages...", 0.7))
+                "2/5 : Verification des elements extraits...", 0.65))
+            time.sleep(0.2)
+
+            # Stocker les donnees pour la correction
+            self._correction_done = False
+            self._corrected_data = None
+
+            def on_correction_validated(corrected_data):
+                self._corrected_data = corrected_data
+                self._correction_done = True
+
+            self.after(0, lambda: self._show_correction_view(
+                on_correction_validated))
+
+            # Attendre la fin de la correction (max 300 secondes)
+            wait_start = time.time()
+            while not self._correction_done and time.time() - wait_start < 300:
+                time.sleep(0.1)
+
+            if self._corrected_data:
+                self.plan_data = self._corrected_data
+
+            self.after(0, lambda: self.progress_panel.set_step(
+                "3/5 : Calcul deterministe des metres et ferraillages...", 0.7))
             time.sleep(0.2)
 
             # Étape 3 : Génération Excel
@@ -759,7 +990,7 @@ class PlanBAMetreApp(*_DND_BASES):
             xlsx_path = output / "metre_genere.xlsx"
 
             with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(self.plan_data, f, ensure_ascii=False, indent=2)
+                json.dump(self.plan_data, f, ensure_ascii=False, indent=2, cls=PlanBAEncoder)
 
             # Générer l'Excel
             from build_metre import MetreGenerator
@@ -793,10 +1024,12 @@ class PlanBAMetreApp(*_DND_BASES):
             self.after(0, lambda: self.progress_panel.set_step(
                 "✅ Terminé ! Métré généré avec succès.", 1.0))
 
-            # Mettre à jour le tableau récap
+            # Mettre a jour le tableau recap
             self.after(0, lambda: self.summary_table.update_values(self.plan_data))
+            self.after(0, lambda: self.rapport_metier.update_from_data(self.plan_data))
             self.after(0, lambda: self.btn_open_excel.configure(state="normal"))
             self.after(0, lambda: self.btn_open_folder.configure(state="normal"))
+            self.after(0, lambda: self.btn_correct.configure(state="normal"))
             self.after(0, lambda: self._log(
                 f"✅ Fichiers générés :\n"
                 f"   → {json_path}\n"
@@ -842,6 +1075,69 @@ class PlanBAMetreApp(*_DND_BASES):
         """Ouvre le dossier de sortie."""
         output = get_output_dir()
         os.startfile(str(output))
+
+    def _show_correction_view(self, on_validate):
+        """Affiche la vue de correction des elements extraits."""
+        from ui.correction_view import CorrectionView
+        CorrectionView(self, self.plan_data, on_validate=on_validate)
+
+    def _open_correction(self):
+        """Ouvre la vue de correction pour modifier les elements extraits."""
+        if not self.plan_data:
+            self._show_error("Aucune donnee extraite. Lancez d'abord l'analyse.")
+            return
+
+        def on_correction_done(corrected_data):
+            self.plan_data = corrected_data
+            self._log("Elements corriges par l'utilisateur.")
+            # Regenerer les fichiers
+            self._regenerate_files()
+
+        self._show_correction_view(on_correction_done)
+
+    def _regenerate_files(self):
+        """Regenere les fichiers Excel et PDF avec les donnees corrigees."""
+        if not self.plan_data:
+            return
+
+        self.btn_action.configure(state="disabled", text="⏳ Regeneration...")
+        thread = threading.Thread(target=self._regeneration_worker, daemon=True)
+        thread.start()
+
+    def _regeneration_worker(self):
+        """Worker de regeneration dans un thread separe."""
+        try:
+            from core.paths import get_output_dir
+            output = get_output_dir()
+            xlsx_path = output / "metre_genere.xlsx"
+
+            self.after(0, lambda: self.progress_panel.set_step(
+                "Regeneration de l'Excel...", 0.5))
+
+            from build_metre import MetreGenerator
+            gen = MetreGenerator(self.plan_data)
+            gen.generer(str(xlsx_path))
+
+            self.after(0, lambda: self.progress_panel.set_step(
+                "Regeneration du rapport PDF...", 0.7))
+            from rapport_metre import generer_rapport
+            rapport_pdf = output / "rapport_metre.pdf"
+            generer_rapport(self.plan_data, str(rapport_pdf))
+
+            self.after(0, lambda: self.progress_panel.set_step(
+                "✅ Termine ! Fichiers regeneres.", 1.0))
+            self.after(0, lambda: self._log(
+                f"✅ Fichiers regeneres :\n"
+                f"   → {xlsx_path}\n"
+                f"   → {rapport_pdf}"))
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            self.after(0, lambda: self._log(
+                f"❌ Erreur regeneration : {e}\n{tb}"))
+        finally:
+            self.after(0, lambda: self.btn_action.configure(
+                state="normal", text="🚀  Lancer l'Analyse & Generer le Metre"))
 
 
 # ============================================================================

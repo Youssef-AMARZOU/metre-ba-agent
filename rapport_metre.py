@@ -53,7 +53,7 @@ def _collect_data(plan_data):
         a = dims.get("a", 0)
         b = dims.get("b", 0)
         h = dims.get("h", 0)
-        vol_beton += a * b * h
+        vol_beton += (a or 0) * (b or 0) * (h or 0)
         nb_elements["Semelles"] += 1
 
         for key, ferr_key in [("ferr_x", "ferr_x"), ("ferr_y", "ferr_y")]:

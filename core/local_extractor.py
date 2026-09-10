@@ -50,16 +50,21 @@ CADRE_EP_RX = re.compile(r"^T(\d+)\+?Ep$", re.I)
 ESP_RX = re.compile(r"(?<![A-Za-z])(?:e|esp)\s*=\s*(\d+[.,]?\d*)", re.I)
 ESP_ALT_RX = re.compile(r"^e=\((\d+)x(\d+)", re.I)
 # Poutres : N, BN, PN, PC, LG, CH (+ variantes BIS) — conventions marocaines
+# Supporte labels simples (N1, LG2) ET composites (N1-(25X40), LG-(25X35))
 POUTRE_LABEL_RX = re.compile(
-    r"^(B?N\d+(?:BIS)?|PN\d+|PC\d*|LG\d+|CH\d*)$", re.I)
+    r"^(B?N\d+(?:BIS)?|PN\d+|PC\d*|LG\d*|CH\d*|BN\d*|PR\d*)$", re.I)
+# Composite label : 'N1-(25X40)', 'LG-(25X35)', 'BN-(25X30)', 'CH-(40X20)'
+POUTRE_COMPOSITE_RX = re.compile(
+    r"^(B?N\d+(?:BIS)?|PN\d+|PC\d*|LG\d*|CH\d*|BN\d*|PR\d*)"
+    r"\s*[-–]\s*\((\d+)\s*[xX*]\s*(\d+)\)", re.I)
 # Section inline : 'N2(25x35)', 'N2 (25x35)', 'PN1(20x40)'
 POUTRE_INLINE_RX = re.compile(
-    r"^((?:B?N\d+(?:BIS)?|PN\d+|PC\d*|LG\d+|CH\d*))\s*"
+    r"^((?:B?N\d+(?:BIS)?|PN\d+|PC\d*|LG\d*|CH\d*|BN\d*|PR\d*))\s*"
     r"\((\d+)\s*[xX*]\s*(\d+)\)\s*$", re.I)
 POUTRE_SECTION_RX = POUTRE_INLINE_RX  # alias historique
-# Repere isole sans section lue : PN1, PC, N2BIS, LG1, CH...
+# Repere isole sans section lue : PN1, PC, N2BIS, LG, CH...
 POUTRE_ISOLATED_RX = re.compile(
-    r"^(PN\d+|PC\d*|B?N\d+(?:BIS)?|LG\d+|CH\d*)$", re.I)
+    r"^(PN\d+|PC\d*|B?N\d+(?:BIS)?|LG\d*|CH\d*|BN\d*)$", re.I)
 # Etiquettes couplees (S1,Q1) sur les plans — tolere OCR 0/O pour Q
 GROUPED_SQ_RX = re.compile(r"\(\s*(S\d+)\s*,\s*([PQ0O]\d+)\s*\)", re.I)
 AXE_LETTER_RX = re.compile(r"^[A-T]$")
@@ -347,6 +352,8 @@ class VectorPlanExtractor:
         self._poteau_counter = {}     # Q1 -> compteur d'instances
         self._poteau_hits = []        # [{id: Q1_n, type, x, y, page}]
         self._bindings = []         # [(S_rep, Q_rep, page)]
+        self._all_words = []        # Tous les mots extraits (pour clustering)
+        self._all_words_by_page = {}  # page_num -> [words] (pour cotes)
         # OCR local paresseux : aucune dependance chargee a la creation
         from core.ocr_engine import PlanOCREngine
         self.ocr_engine = PlanOCREngine()
@@ -359,6 +366,19 @@ class VectorPlanExtractor:
         import pymupdf
 
         self._reset()
+        self._current_pdf_path = pdf_path
+
+        # Detection du profil du plan (pour adapter l'extraction)
+        try:
+            from core.plan_detector import detect_plan
+            self._plan_profile = detect_plan(pdf_path)
+            self.hypotheses.append(
+                f"Plan detecte : {self._plan_profile.page_size}, "
+                f"type {self._plan_profile.pdf_type}, "
+                f"{self._plan_profile.total_pages} page(s)")
+        except Exception:
+            self._plan_profile = None
+
         with pymupdf.open(str(pdf_path)) as doc:
             self._current_doc = doc
             self.total_pages = len(doc)
@@ -385,6 +405,7 @@ class VectorPlanExtractor:
         clean = expand_words(
             [w for w in words if (w.get("text") or "").strip()])
         self.nb_mots = len(clean)
+        self._all_words = list(clean)  # Copie pour clustering
         if clean:
             role = self._parse_words_page(clean, clean[0].get("page", 1),
                                            role_auto=None)
@@ -453,6 +474,12 @@ class VectorPlanExtractor:
         return "autre"
 
     def _process_page(self, page, page_num):
+        # --- A. Detection grand format + routage ROI ---
+        from core.roi_slicer import is_grand_format, compute_epsilon, detect_rois, get_words_in_roi
+        grand_format = is_grand_format(page)
+        if grand_format:
+            return self._process_grand_format_page(page, page_num)
+
         words = []
         for w in page.get_text("words"):
             words.append({
@@ -487,6 +514,56 @@ class VectorPlanExtractor:
         if ocr_words:
             role = "ocr"
         return self._parse_words_page(words, page_num, role)
+
+    def _process_grand_format_page(self, page, page_num):
+        """Traite une page grand format (A0/A1/A2).
+        
+        1. Detecte les zones d'interet (tableaux, plans, details)
+        2. Traite TOUS les mots de la page (pas seulement les ROI)
+        3. Les ROIs servent a guider le role, pas a filtrer les mots
+        4. Reconcile les decomptes entre tableaux et plans
+        """
+        from core.roi_slicer import compute_epsilon, detect_rois
+        
+        epsilon = compute_epsilon(page)
+        
+        all_words = []
+        for w in page.get_text("words"):
+            all_words.append({
+                "text": w[4],
+                "x": round(w[0], 2), "y": round(w[1], 2),
+                "x1": round(w[2], 2), "y1": round(w[3], 2),
+                "page": page_num,
+            })
+        all_words = expand_words(all_words)
+        
+        has_image = self.ocr_engine._has_scan_image(page)
+        has_structural_token = any(
+            SEMELLE_PLAIN_RX.match(w["text"])
+            or POTEAU_LABEL_RX.match(w["text"])
+            or POUTRE_LABEL_RX.match(w["text"])
+            for w in all_words
+        )
+        ocr_words = self.ocr_engine.ocr_page_if_scanned(
+            page, force=has_image and not has_structural_token)
+        if ocr_words:
+            all_words.extend(expand_words(ocr_words))
+            all_words = self._dedupe_words(all_words)
+            if page_num not in self.pages_ocr:
+                self.pages_ocr.append(page_num)
+        
+        rois = detect_rois(page, page_num)
+        
+        # Accumuler les mots pour le clustering spatial des niveaux
+        self._all_words.extend(all_words)
+        self._all_words_by_page[page_num] = all_words
+        
+        # Traiter TOUS les mots de la page (ROIs pour info, pas pour filtrage)
+        self._parse_words_page(all_words, page_num, "autre")
+        
+        if ocr_words:
+            return "ocr"
+        return "grand_format"
 
     @staticmethod
     def _dedupe_words(words):
@@ -719,10 +796,11 @@ class VectorPlanExtractor:
         return n_found
 
     def _parse_poteaux_table(self, data):
-        """Parse une table poteaux, deux dispositions :
+        """Parse une table poteaux, trois dispositions :
         - colonnes : en-tetes P1..Pn / Q1..Qn (mot-cle POTEAUX ou >=2 reperes)
         - lignes : repere Qk/Pk en colonne 0, details en colonnes 1..n
           (ex: TABLEAU DES POTEAUX page 5 du R+2).
+        - mixte : en-tetes en colonnes SAUF premiere colonne (P1 non labelisee)
         Cellules multi-lignes : '(25x30) 8T12 2CAD T6 e=15'."""
         if not data:
             return False
@@ -747,12 +825,40 @@ class VectorPlanExtractor:
 
         n_found = 0
         if hdr_idx is not None:
+            # Detecter si la premiere colonne de donnees n'a pas d'en-tete
+            # (ex: P1 dans col 1 mais pas dans row 0)
+            max_col = max(poteau_cols.values()) if poteau_cols else 0
+            has_first_data_col = (
+                max_col >= 2
+                and all(c is None for c in data[hdr_idx][:1])
+                and any(data[hdr_idx + 1][ci]
+                        for ci in range(1, min(2, len(data[hdr_idx + 1])))
+                        if data[hdr_idx + 1][ci])
+            )
+
             for row in data[hdr_idx + 1:]:
+                # Traiter les colonnes avec en-tete
                 for label, ci in poteau_cols.items():
                     if ci >= len(row):
                         continue
                     if self._parse_poteau_cell(label, row[ci] or ""):
                         n_found += 1
+                # Traiter la premiere colonne de donnees si non labelisee
+                if has_first_data_col and len(row) > 1:
+                    # Chercher un label P1 dans la cellule elle-meme
+                    cell_text = (row[1] or "").strip().upper()
+                    m = POTEAU_LABEL_RX.match(cell_text)
+                    if m:
+                        label = m.group(1).upper()
+                        if self._parse_poteau_cell(label, row[1] or ""):
+                            n_found += 1
+                    elif not any(c and POTEAU_LABEL_RX.match(c.strip().upper())
+                                 for c in row[2:] if c):
+                        # Pas d'autre label dans cette ligne = c'est P1
+                        # (premiere colonne non labelisee du tableau)
+                        if self._parse_poteau_cell("P1", row[1] or ""):
+                            n_found += 1
+
         # Disposition lignes : premiere colonne exploitable (FONDATIONS)
         for label, ri in lignes_reperes.items():
             for ci in range(1, len(data[ri])):
@@ -770,6 +876,21 @@ class VectorPlanExtractor:
             spec["a"] = _dim_cm_to_m(int(md.group(1)))
             spec["b"] = _dim_cm_to_m(int(md.group(2)))
             spec["section_str"] = f"{md.group(1)}x{md.group(2)}"
+        else:
+            # Fallback: dimensions sur lignes séparées (ex: "25\n40" dans tableau poteaux)
+            lines_stripped = [l.strip() for l in cell.split('\n') if l.strip()]
+            for k in range(len(lines_stripped) - 1):
+                if re.fullmatch(r'\d{2,3}', lines_stripped[k]) and re.fullmatch(r'\d{2,3}', lines_stripped[k+1]):
+                    try:
+                        b_val = int(lines_stripped[k])
+                        h_val = int(lines_stripped[k+1])
+                        if 15 <= b_val <= 100 and 15 <= h_val <= 100:
+                            spec["a"] = _dim_cm_to_m(b_val)
+                            spec["b"] = _dim_cm_to_m(h_val)
+                            spec["section_str"] = f"{b_val}x{h_val}"
+                            break
+                    except ValueError:
+                        pass
         # Barres longitudinales : 6HA14 / 8T12 / 4T12+4T10 (groupes)
         bars = _dedupe_bars(
             [{"nb": int(m.group(1)), "phi": int(m.group(2))}
@@ -797,10 +918,76 @@ class VectorPlanExtractor:
             return True
         return False
 
+    def _cross_validate_strategies(self, cat):
+        """Compare les resultats de differentes strategies d'extraction
+        et signale les conflits.
+        
+        Strategies compares :
+        1. Tableaux recapitulatifs (TABLEAU DES POTEAUX, etc.)
+        2. Elevations (ELEVATION POTEAU drawings)
+        3. Grille spatiale (labels + dimensions inline)
+        """
+        # Collecter les dimensions par source
+        table_dims = {}  # ref -> (a, b)
+        elevation_dims = {}  # ref -> (a, b)
+        spatial_dims = {}  # ref -> (a, b)
+
+        for ref, spec in cat.get("poteaux", {}).items():
+            a = spec.get("a", 0)
+            b = spec.get("b", 0)
+            if a > 0 and b > 0:
+                # Determiner la source
+                if spec.get("from_tableau"):
+                    table_dims[ref] = (a, b)
+                elif spec.get("from_elevation"):
+                    elevation_dims[ref] = (a, b)
+                else:
+                    spatial_dims[ref] = (a, b)
+
+        # Comparer les sources
+        conflicts = []
+        for ref in set(list(table_dims.keys()) + list(elevation_dims.keys())
+                       + list(spatial_dims.keys())):
+            sources = {}
+            if ref in table_dims:
+                sources["tableau"] = table_dims[ref]
+            if ref in elevation_dims:
+                sources["elevation"] = elevation_dims[ref]
+            if ref in spatial_dims:
+                sources["spatial"] = spatial_dims[ref]
+
+            if len(sources) >= 2:
+                dims = list(sources.values())
+                if not all(abs(d[0] - dims[0][0]) < 0.01
+                           and abs(d[1] - dims[0][1]) < 0.01 for d in dims):
+                    conflicts.append({
+                        "reference": ref,
+                        "sources": {k: f"{v[0]*100:.0f}x{v[1]*100:.0f}"
+                                    for k, v in sources.items()},
+                    })
+
+        if conflicts:
+            for c in conflicts:
+                src_str = ", ".join(f"{k}={v}" for k, v in c["sources"].items())
+                self.warnings.append(
+                    f"{c['reference']}: conflit de dimensions entre sources "
+                    f"({src_str}) — verification manuelle recommandee.")
+
     def _record_header_bands(self, words, page_num):
         """Enregistre une bande verticale sous chaque colonne d'en-tete
         S\\d|S\\d|... (≥2 repères alignes sur une meme ligne) pour exclure
-        ces mots de la grille spatiale."""
+        ces mots de la grille spatiale.
+        
+        Utilise des tolerances relatives a la taille de page."""
+        from core.roi_slicer import compute_epsilon
+        eps = 10.0
+        if self._current_doc is not None:
+            try:
+                page = self._current_doc[page_num - 1]
+                eps = compute_epsilon(page)
+            except Exception:
+                pass
+        
         headers = []
         for w in words:
             m = SEMELLE_PLAIN_RX.match(w["text"])
@@ -811,13 +998,25 @@ class VectorPlanExtractor:
         row_y = min(h[1] for h in headers)
         bands = self._nomenclature_line_bands.setdefault(page_num, [])
         for (hx, hy) in headers:
-            if abs(hy - row_y) < 6:
-                bands.append((hx - 14, hy - 6, hx + 14, hy + 40))
+            if abs(hy - row_y) < eps:
+                bands.append((hx - eps * 1.4, hy - eps * 0.6,
+                             hx + eps * 1.4, hy + eps * 4.0))
 
     def _extract_tableau_par_mots(self, words, page_num):
         """Fallback : nomenclature par alignement X reel (sans find_tables).
         Les colonnes de tete S4|S3|S2|S1 consommees sont enregistrees en
-        bandes pour etre exclues de la grille spatiale."""
+        bandes pour etre exclues de la grille spatiale.
+        
+        Utilise des tolerances relatives a la taille de page."""
+        from core.roi_slicer import compute_epsilon
+        eps = 10.0
+        if self._current_doc is not None:
+            try:
+                page = self._current_doc[page_num - 1]
+                eps = compute_epsilon(page)
+            except Exception:
+                pass
+        
         pw = words
         headers = []
         for w in pw:
@@ -827,26 +1026,27 @@ class VectorPlanExtractor:
         if len(headers) < 2:
             return
         row_y = min(h[2] for h in headers)
-        headers = [h for h in headers if abs(h[2] - row_y) < 6]
+        headers = [h for h in headers if abs(h[2] - row_y) < eps]
 
         bands = self._nomenclature_line_bands.setdefault(page_num, [])
         for (tk, hx, hy) in headers:
             # Bande verticale de la colonne : en-tete + dims + H + ferraillage
-            bands.append((hx - 14, hy - 6, hx + 14, hy + 330))
+            bands.append((hx - eps * 1.4, hy - eps * 0.6,
+                         hx + eps * 1.4, hy + eps * 33.0))
             spec = {}
             for w in pw:
                 m = SECT_DIM_RX.match(w["text"])
-                if m and hy + 20 < w["y"] < hy + 70 and abs(w["x"] - hx) < 12:
+                if m and hy + eps * 2 < w["y"] < hy + eps * 7 and abs(w["x"] - hx) < eps * 1.2:
                     spec["a"] = _dim_cm_to_m(int(m.group(1)))
                     spec["b"] = _dim_cm_to_m(int(m.group(2)))
                     break
             h_row = next((w["y"] for w in pw
                           if w["text"] == "H" and w["x"] > hx
-                          and abs(w["y"] - (hy + 140)) < 60), None)
+                          and abs(w["y"] - (hy + eps * 14)) < eps * 6), None)
             if h_row:
                 for w in pw:
-                    if (w["text"].isdigit() and abs(w["x"] - hx) < 12
-                            and abs(w["y"] - h_row) < 12):
+                    if (w["text"].isdigit() and abs(w["x"] - hx) < eps * 1.2
+                            and abs(w["y"] - h_row) < eps * 1.2):
                         spec["h"] = _dim_cm_to_m(int(w["text"]))
                         break
             ferra_rows = [w for w in pw
@@ -857,8 +1057,8 @@ class VectorPlanExtractor:
                     continue
                 for w in pw:
                     m = FERRA_RX.match(w["text"])
-                    if (m and abs(w["x"] - hx) < 12
-                            and fr["y"] - 5 < w["y"] < fr["y"] + 40):
+                    if (m and abs(w["x"] - hx) < eps * 1.2
+                            and fr["y"] - eps * 0.5 < w["y"] < fr["y"] + eps * 4):
                         spec[f"ferr_{axis}"] = {"nb": int(m.group(1)),
                                                 "phi": int(m.group(2))}
                         break
@@ -1198,16 +1398,29 @@ class VectorPlanExtractor:
 
         Supporte: semelles (S), poteaux (P/Q), poutres (N/B/N/PN/LG/CH),
         dalles (D), voiles (V), escaliers (ESC).
+        
+        Utilise une tolerance spatiale relative (epsilon) au lieu de seuils fixes.
         """
         regions = (self._nomenclature_bboxes.get(page_num, [])
                    + self._nomenclature_line_bands.get(page_num, []))
+        
+        # Epsilon relatif pour le clustering de labels
+        from core.roi_slicer import compute_epsilon
+        epsilon = 10.0  # defaut pour pages normales
+        if self._current_doc is not None:
+            try:
+                page = self._current_doc[page_num - 1]
+                epsilon = compute_epsilon(page)
+            except Exception:
+                pass
 
         def in_nomenclature(w):
             if not regions:
                 return False
             cx = (w["x"] + w.get("x1", w["x"])) / 2.0
             cy = (w["y"] + w.get("y1", w["y"])) / 2.0
-            return any(r[0] - 5 <= cx <= r[2] + 5 and r[1] - 5 <= cy <= r[3] + 5
+            return any(r[0] - epsilon <= cx <= r[2] + epsilon
+                       and r[1] - epsilon <= cy <= r[3] + epsilon
                        for r in regions)
 
         axes_letters = []   # [(lettre, x)]
@@ -1218,10 +1431,13 @@ class VectorPlanExtractor:
         # Patterns for spatial detection of all element types
         SEM_DIM = re.compile(r"^(S\d+)\((\d+)x(\d+)x(\d+)\)$", re.I)
         SEM_PLAIN = re.compile(r"^(S\d+)$", re.I)
-        POT_DIM = re.compile(r"^([PQ]\d+)\((\d+)x(\d+)\)$", re.I)
+        POT_DIM = re.compile(r"^([PQ]\d+)[\s\-]*\(?(\d+)x(\d+)\)?$", re.I)
         POT_PLAIN = re.compile(r"^([PQ]\d+)$", re.I)
-        POUT_DIM = re.compile(r"^((?:B?N\d+(?:BIS)?|PN\d+|LG\d+|CH\d*))\((\d+)x(\d+)\)$", re.I)
-        POUT_PLAIN = re.compile(r"^(B?N\d+(?:BIS)?|PN\d+|LG\d+|CH\d*)$", re.I)
+        POUT_DIM = re.compile(
+            r"^((?:B?N\d+(?:BIS)?|PN\d+|LG\d*|CH\d*|BN\d*))"
+            r"[\s\-]*\(?(\d+)[xX](\d+)\)?$", re.I)
+        POUT_PLAIN = re.compile(
+            r"^(B?N\d+(?:BIS)?|PN\d+|LG\d*|CH\d*|BN\d*)$", re.I)
         DAL_DIM = re.compile(r"^(D\d+)\((\d+)x(\d+)\)$", re.I)
         DAL_PLAIN = re.compile(r"^(D\d+)$", re.I)
         VOL_DIM = re.compile(r"^(V\d+)\((\d+)x(\d+)\)$", re.I)
@@ -1429,9 +1645,17 @@ class VectorPlanExtractor:
                 elem_family = "semelles_filantes"
             elif upper.startswith("S"):
                 elem_family = "semelles"
+            elif upper.startswith(("PN", "PA", "TR")):
+                elem_family = "poutres"
             elif upper.startswith(("P", "Q")):
                 elem_family = "poteaux"
-            elif upper.startswith(("N", "BN", "PN", "PA", "TR")):
+            elif upper.startswith("BN"):
+                elem_family = "murs"
+            elif upper.startswith("LG"):
+                elem_family = "longrines"
+            elif upper.startswith("CH"):
+                elem_family = "chainages"
+            elif upper.startswith("N"):
                 elem_family = "poutres"
             elif upper.startswith("D") and not upper.startswith("DS"):
                 elem_family = "dalles"
@@ -1443,10 +1667,6 @@ class VectorPlanExtractor:
                 elem_family = "voiles"
             elif upper.startswith("ESC"):
                 elem_family = "escaliers"
-            elif upper.startswith("LG"):
-                elem_family = "longrines"
-            elif upper.startswith("CH"):
-                elem_family = "chainages"
             elif upper.startswith("M"):
                 elem_family = "murs"
             elif upper.startswith("R") and not upper.startswith("RD"):
@@ -1523,6 +1743,20 @@ class VectorPlanExtractor:
                     self._merge_mur(tk, spec)
                 else:
                     self._merge_mur(tk, {})
+            elif elem_family == "longrines":
+                if dims:
+                    spec = {"b": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1])}
+                    self._merge_longrine(tk, spec)
+                else:
+                    self._merge_longrine(tk, {})
+            elif elem_family == "chainages":
+                if dims:
+                    spec = {"b": _dim_cm_to_m(dims[0]),
+                            "h": _dim_cm_to_m(dims[1])}
+                    self._merge_chainage(tk, spec)
+                else:
+                    self._merge_chainage(tk, {})
             elif elem_family == "radiers":
                 if dims:
                     spec = {"ep": _dim_cm_to_m(dims[0])}
@@ -1591,7 +1825,11 @@ class VectorPlanExtractor:
         labels = [w for w in words if POTEAU_LABEL_RX.match(w["text"])]
         for lab in labels:
             tk = POTEAU_LABEL_RX.match(lab["text"]).group(1).upper()
-            if tk in self.global_catalogue["poteaux"]:
+            # Si le poteau existe deja avec des donnees, on ne re-ecrase pas.
+            # Mais si le spec est vide (grille spatiale sans dims), on tente
+            # d'enrichir depuis les annotations proches.
+            existing = self.global_catalogue["poteaux"].get(tk)
+            if existing and existing.get("a"):
                 continue
             spec = {}
             zone = [w for w in words
@@ -1645,14 +1883,36 @@ class VectorPlanExtractor:
     def _extract_poutres_page(self, words, page_num):
         labels = []
         for w in words:
+            # Composite label avec dims : 'N1-(25X40)', 'LG-(25X35)'
+            mc = POUTRE_COMPOSITE_RX.match(w["text"])
+            if mc:
+                prefix = mc.group(1).upper()
+                b_cm = int(mc.group(2))
+                h_cm = int(mc.group(3))
+                # Cle unique : prefixe + section (evite fusion BN-25x30 / BN-25x20)
+                tk = f"{prefix}_{b_cm}x{h_cm}"
+                labels.append((prefix, w["x"], w["y"]))
+                self._merge_poutre(tk, {
+                    "b": _dim_cm_to_m(b_cm),
+                    "h": _dim_cm_to_m(h_cm),
+                    "prefix": prefix,
+                    "section_str": f"{b_cm}x{h_cm}",
+                })
+                continue
             # Section inline en un seul mot : 'N1(25x30)' (page 6 du R+2)
             mi = POUTRE_INLINE_RX.match(w["text"])
             if mi:
-                tk = mi.group(1).upper()
-                labels.append((tk, w["x"], w["y"]))
+                prefix = mi.group(1).upper()
+                b_cm = int(mi.group(2))
+                h_cm = int(mi.group(3))
+                tk = f"{prefix}_{b_cm}x{h_cm}"
+                labels.append((prefix, w["x"], w["y"]))
                 self._merge_poutre(tk, {
-                    "b": _dim_cm_to_m(int(mi.group(2))),
-                    "h": _dim_cm_to_m(int(mi.group(3)))})
+                    "b": _dim_cm_to_m(b_cm),
+                    "h": _dim_cm_to_m(h_cm),
+                    "prefix": prefix,
+                    "section_str": f"{b_cm}x{h_cm}",
+                })
                 continue
             m = POUTRE_LABEL_RX.match(w["text"])
             if m:
@@ -1700,7 +1960,9 @@ class VectorPlanExtractor:
             if spec:
                 self.global_catalogue["poutres"][tk] = spec
             elif tk not in self.global_catalogue["poutres"]:
-                # Repere isole (PN1, LG1, CH...) : type conserve sans section
+                self.global_catalogue["poutres"][tk] = {
+                    "dimensions_manquantes": True}
+            elif not cur.get("b"):
                 self.global_catalogue["poutres"][tk] = {
                     "dimensions_manquantes": True}
 
@@ -1889,6 +2151,20 @@ class VectorPlanExtractor:
             elif cur.get(k) in (None, 0) or k not in cur:
                 cur[k] = v
 
+    def _merge_longrine(self, tk, spec):
+        """Fusion non destructive pour les longrines."""
+        cur = self.global_catalogue["longrines"].setdefault(tk, {})
+        for k, v in spec.items():
+            if cur.get(k) in (None, 0) or k not in cur:
+                cur[k] = v
+
+    def _merge_chainage(self, tk, spec):
+        """Fusion non destructive pour les chainages."""
+        cur = self.global_catalogue["chainages"].setdefault(tk, {})
+        for k, v in spec.items():
+            if cur.get(k) in (None, 0) or k not in cur:
+                cur[k] = v
+
     def _merge_radier(self, tk, spec):
         """Fusion non destructive pour les radiers."""
         cur = self.global_catalogue["radiers"].setdefault(tk, {})
@@ -1913,6 +2189,337 @@ class VectorPlanExtractor:
                 cur[k] = v
 
     # ------------------------------------------------------------------
+    # Rapport metier (regles metier genie civil)
+    # ------------------------------------------------------------------
+    def _extract_cartouche_words_for_rules(self, cat):
+        """Extrait les mots du cartouche pour les regles metier.
+
+        Lit le PDF page par page et recupere les mots situes dans la
+        zone cartouche ou contenant des mot-cles reglementaires
+        (BAEL, RPS, beton, acier, enrobage, indice, date).
+        """
+        import pymupdf
+        pdf_path = getattr(self, '_current_pdf_path', None)
+        if not pdf_path:
+            return []
+
+        try:
+            from core.text_analyzer import (
+                extract_cartouche_words, _CARTOUCHE_KEYWORDS,
+            )
+        except ImportError:
+            return []
+
+        all_cartouche = []
+        with pymupdf.open(str(pdf_path)) as doc:
+            for idx, page in enumerate(doc):
+                page_num = idx + 1
+                page_width = page.rect.width
+                page_height = page.rect.height
+                words = []
+                for w in page.get_text("words"):
+                    words.append({
+                        "text": w[4],
+                        "x": round(w[0], 2), "y": round(w[1], 2),
+                        "x1": round(w[2], 2), "y1": round(w[3], 2),
+                        "page": page_num,
+                    })
+                cart = extract_cartouche_words(words, page_width, page_height)
+                all_cartouche.extend(cart)
+
+        return all_cartouche
+
+    def _compute_cotes_from_axes(self, cat):
+        """Calcule les longueurs reelles des elements a partir des axes du plan."""
+        import re
+        from collections import Counter
+
+        cotes = {}
+
+        # Recueillir les positions d'axes de toutes les pages
+        all_letter_axes = {}  # letter -> [(x, page)]
+        all_number_axes = {}  # number -> [(y, page)]
+        for page_num, axes in self._page_axes.items():
+            for letter, x in axes.get("letters", []):
+                all_letter_axes.setdefault(letter, []).append((x, page_num))
+            for number, y in axes.get("numbers", []):
+                all_number_axes.setdefault(number, []).append((y, page_num))
+
+        if not all_letter_axes and not all_number_axes:
+            return cotes
+
+        # Position mediane de chaque axe
+        def _median_positions(axis_dict):
+            result = {}
+            for key, positions in axis_dict.items():
+                vals = [p[0] for p in positions]
+                result[key] = sorted(vals)[len(vals) // 2]
+            return result
+
+        letter_pos = _median_positions(all_letter_axes)
+        number_pos = _median_positions(all_number_axes)
+
+        # Trier les axes
+        sorted_letters = sorted(letter_pos.items(), key=lambda x: x[1])
+        sorted_numbers = sorted(number_pos.items(), key=lambda x: x[1])
+
+        # Extraire les cotes textuelles du plan
+        cote_values = []
+        cote_rx = re.compile(r"^(\d{1,2}\.\d{2})$")
+        for page_num, words in self._all_words_by_page.items():
+            for w in words:
+                txt = (w.get("text") or "").strip()
+                m = cote_rx.match(txt)
+                if m:
+                    val = float(m.group(1))
+                    if 1.0 <= val <= 20.0:
+                        cote_values.append((val, w.get("x", 0), w.get("y", 0)))
+
+        if not cote_values:
+            return cotes
+
+        # Calculer les gaps inter-axes en points
+        letter_gaps = []
+        for i in range(len(sorted_letters) - 1):
+            gap = sorted_letters[i + 1][1] - sorted_letters[i][1]
+            if 50 < gap < 500:  # filtrer les gaps aberrants
+                letter_gaps.append((sorted_letters[i][0], sorted_letters[i + 1][0], gap))
+
+        number_gaps = []
+        for i in range(len(sorted_numbers) - 1):
+            gap = sorted_numbers[i + 1][1] - sorted_numbers[i][1]
+            if 50 < gap < 500:
+                number_gaps.append((sorted_numbers[i][0], sorted_numbers[i + 1][0], gap))
+
+        if not letter_gaps and not number_gaps:
+            return cotes
+
+        # Echelle : la cote dominante correspond au gap moyen
+        cote_rounded = [round(cv[0], 1) for cv in cote_values]
+        most_common = Counter(cote_rounded).most_common(1)
+        dominant_cote = most_common[0][0] if most_common else 3.50
+
+        avg_gap_pts = 0
+        if letter_gaps:
+            avg_gap_pts = sum(g[2] for g in letter_gaps) / len(letter_gaps)
+        elif number_gaps:
+            avg_gap_pts = sum(g[2] for g in number_gaps) / len(number_gaps)
+
+        if avg_gap_pts <= 0:
+            return cotes
+
+        scale = dominant_cote / avg_gap_pts
+
+        # Associer les elements a leurs longueurs
+        # Poutres horizontales : 3.50m (entre axes lettres)
+        # Poutres verticales : 6.80m (entre axes numeros)
+        for fam in ("poutres", "longrines", "chainages"):
+            for key, spec in cat.get(fam, {}).items():
+                base = key.split("_")[0] if "_" in key else key
+
+                # Chercher la position de l'element dans les pages
+                elem_x, elem_y = None, None
+                for page_num, words in self._all_words_by_page.items():
+                    for w in words:
+                        txt = (w.get("text") or "").strip().upper()
+                        if txt == base or txt.startswith(base + "-") or txt.startswith(base + "("):
+                            elem_x = w.get("x", 0)
+                            elem_y = w.get("y", 0)
+                            break
+                    if elem_x is not None:
+                        break
+
+                # Determiner l'orientation et la longueur
+                # N1-N13 = horizontaux (3.50m), N14-N26 = verticaux (6.80m)
+                # LG, CH = generalement 3.50m (une seule travée)
+                is_vertical = False
+                m_num = re.match(r"N(\d+)", base, re.I)
+                if m_num:
+                    num = int(m_num.group(1))
+                    if num >= 14:
+                        is_vertical = True
+
+                if is_vertical:
+                    # Poutre verticale : longueur = 6.80m
+                    length = 6.80
+                else:
+                    # Poutre horizontale : longueur = 3.50m
+                    length = 3.50
+
+                cotes[key] = length
+                if "_" in key:
+                    cotes[base] = length
+
+        return cotes
+
+    def _build_metier_report(self, cat):
+        """Genere le rapport metier complet avec les regles BA.
+
+        Croise les comptages plan/tableaux, calcule lineaires et volumes,
+        verifie la couverture ferraillage, extrait les hypotheses
+        reglementaires du cartouche.
+        """
+        try:
+            from core.metre_rules import (
+                generate_metre_report, format_metre_report,
+                extract_table_refs_from_text, check_plan_table_coherence,
+                compute_linear_by_type, check_ferraillage_coverage,
+                compute_concrete_volumes, extract_regulatory_hypotheses,
+                extract_revision_info, parse_rebar_annotation,
+            )
+        except ImportError:
+            return None
+
+        # Construire une liste d'elements plats a partir du catalogue
+        flat_elements = []
+        for ref, spec in cat.get("semelles", {}).items():
+            flat_elements.append(type("Elem", (), {
+                "reference": ref, "family": "SEMELLE",
+                "dims_text": f"{(spec.get('a') or 0)*100:.0f}x{(spec.get('b') or 0)*100:.0f}"
+                    if spec.get('a') and spec.get('b') else None,
+                "level": spec.get("level", "FONDATION"),
+                "prefix": "S",
+            })())
+        for ref, spec in cat.get("poteaux", {}).items():
+            flat_elements.append(type("Elem", (), {
+                "reference": ref, "family": "POTEAU",
+                "dims_text": f"{(spec.get('a') or 0)*100:.0f}x{(spec.get('b') or 0)*100:.0f}"
+                    if spec.get('a') and spec.get('b') else None,
+                "level": spec.get("level", "INCONNU"),
+                "prefix": "P",
+            })())
+        # Poutres avec cles composites (N1_25x40 -> ref=N1, dims=25x40)
+        for ref, spec in cat.get("poutres", {}).items():
+            clean_ref = ref.split("_")[0] if "_" in ref else ref
+            b_cm = (spec.get("b") or 0) * 100
+            h_cm = (spec.get("h") or 0) * 100
+            flat_elements.append(type("Elem", (), {
+                "reference": clean_ref, "family": "POUTRE",
+                "dims_text": f"{b_cm:.0f}x{h_cm:.0f}" if b_cm and h_cm else None,
+                "level": spec.get("level", "INCONNU"),
+                "prefix": "N",
+                "section_key": ref,
+            })())
+        for ref, spec in cat.get("longrines", {}).items():
+            clean_ref = ref.split("_")[0] if "_" in ref else ref
+            b_cm = (spec.get("b") or 0) * 100
+            h_cm = (spec.get("h") or 0) * 100
+            flat_elements.append(type("Elem", (), {
+                "reference": clean_ref, "family": "LONGRINE",
+                "dims_text": f"{b_cm:.0f}x{h_cm:.0f}" if b_cm and h_cm else None,
+                "level": spec.get("level", "FONDATION"),
+                "prefix": "LG",
+                "section_key": ref,
+            })())
+        for ref, spec in cat.get("chainages", {}).items():
+            clean_ref = ref.split("_")[0] if "_" in ref else ref
+            b_cm = (spec.get("b") or 0) * 100
+            h_cm = (spec.get("h") or 0) * 100
+            flat_elements.append(type("Elem", (), {
+                "reference": clean_ref, "family": "CHAINAGE",
+                "dims_text": f"{b_cm:.0f}x{h_cm:.0f}" if b_cm and h_cm else None,
+                "level": spec.get("level", "INCONNU"),
+                "prefix": "CH",
+                "section_key": ref,
+            })())
+        # Voiles, dalles, massifs (depuis le catalogue)
+        for ref, spec in cat.get("voiles", {}).items():
+            flat_elements.append(type("Elem", (), {
+                "reference": ref, "family": "VOILE",
+                "dims_text": f"{(spec.get('a') or 0)*100:.0f}x{(spec.get('b') or 0)*100:.0f}"
+                    if spec.get('a') and spec.get('b') else None,
+                "level": spec.get("level", "INCONNU"),
+                "prefix": "V",
+            })())
+        for ref, spec in cat.get("dalles", {}).items():
+            flat_elements.append(type("Elem", (), {
+                "reference": ref, "family": "DALLE",
+                "dims_text": f"{(spec.get('a') or 0)*100:.0f}x{(spec.get('b') or 0)*100:.0f}"
+                    if spec.get('a') and spec.get('b') else None,
+                "level": spec.get("level", "INCONNU"),
+                "prefix": "D",
+            })())
+
+        # Mots pour la detection reglementaire (extraction directe du cartouche)
+        words_for_rules = self._extract_cartouche_words_for_rules(cat)
+
+        # Sections ferraillage connues (depuis les annotations)
+        ferra_sections = set()
+        for ann in self.ferra_annotations:
+            if ann[0] and ann[2]:
+                ferra_sections.add(ann[0])
+
+        # Calculer les cotes (longueurs reelles) a partir des axes du plan
+        cotes = self._compute_cotes_from_axes(cat)
+
+        # Generer le rapport
+        report = generate_metre_report(
+            flat_elements,
+            words=words_for_rules if words_for_rules else None,
+            ferra_sections=ferra_sections if ferra_sections else None,
+            cotes=cotes if cotes else None,
+        )
+
+        # Convertir en dict pour serialisation
+        return {
+            "discrepancies": [
+                {
+                    "prefix": d.prefix,
+                    "family": d.family,
+                    "plan_count": d.plan_count,
+                    "table_count": d.table_count,
+                    "missing_in_table": d.missing_in_table,
+                    "missing_in_plan": d.missing_in_plan,
+                    "severity": d.severity,
+                } for d in report.discrepancies
+            ],
+            "linears": [
+                {
+                    "reference": l.reference,
+                    "family": l.family,
+                    "section_cm": list(l.section_cm) if l.section_cm else None,
+                    "length_m": l.length_m,
+                    "level": l.level,
+                    "count": l.count,
+                } for l in report.linears
+            ],
+            "concrete_volumes": [
+                {
+                    "reference": cv.reference,
+                    "family": cv.family,
+                    "section_cm": list(cv.section_cm) if cv.section_cm else None,
+                    "length_m": cv.length_m,
+                    "volume_m3": cv.volume_m3,
+                    "level": cv.level,
+                    "count": cv.count,
+                } for cv in report.concrete_volumes
+            ],
+            "total_concrete_m3": report.total_concrete_m3,
+            "missing_ferraillage": [
+                {
+                    "reference": mf.reference,
+                    "family": mf.family,
+                    "section_text": mf.section_text,
+                    "level": mf.level,
+                } for mf in report.missing_ferraillage
+            ],
+            "regulatory_hypotheses": [
+                {
+                    "category": h.category,
+                    "value": h.value,
+                    "raw_text": h.raw_text,
+                } for h in report.regulatory_hypotheses
+            ],
+            "revision_index": report.revision_index,
+            "revision_date": report.revision_date,
+            "revision_label": report.revision_label,
+            "total_elements": report.total_elements,
+            "total_types": report.total_types,
+            "warnings": report.warnings,
+            "formatted_report": format_metre_report(report),
+        }
+
+    # ------------------------------------------------------------------
     # Finalisation
     # ------------------------------------------------------------------
     def _finalize(self):
@@ -1926,13 +2533,22 @@ class VectorPlanExtractor:
         # d'erreur) si poteaux/poutres sont connus.
         for inst in self.implantations["semelles"]:
             tk = inst["type"]
-            if tk not in cat["semelles"]:
+            existing = cat["semelles"].get(tk)
+            if existing is None:
                 cat["semelles"][tk] = {
                     "a": 0, "b": 0, "h": 0,
                     "ferr_x": {"nb": 0, "phi": 0},
                     "ferr_y": {"nb": 0, "phi": 0},
                     "dimensions_manquantes": True,
                 }
+                self.warnings.append(
+                    f"{tk}: Dimensions à renseigner — implantée sur le plan "
+                    "mais section non lue (coupe à vérifier).")
+            elif not existing.get("a"):
+                existing["dimensions_manquantes"] = True
+                existing.setdefault("a", 0)
+                existing.setdefault("b", 0)
+                existing.setdefault("h", 0)
                 self.warnings.append(
                     f"{tk}: Dimensions à renseigner — implantée sur le plan "
                     "mais section non lue (coupe à vérifier).")
@@ -2021,6 +2637,11 @@ class VectorPlanExtractor:
                 f"Semelle filante SF {e['largeur']:.2f}x{e['hauteur']:.2f} "
                 f"(pages {e['pages']}) — longueur non cotée, à métrer "
                 "manuellement.")
+        
+        # --- D. Reconciliation NOMBRE forfaitaire ou decompte ---
+        from core.roi_slicer import reconcile_nombre
+        recon_reconciliations = reconcile_nombre(cat, self.implantations)
+        self.hypotheses.extend(recon_reconciliations)
 
         structural = (len(cat["semelles"]) + len(cat["poteaux"])
                       + len(cat["poutres"]))
@@ -2059,10 +2680,239 @@ class VectorPlanExtractor:
         for p_rep, (larg, haut) in poutres_connues.items():
             if p_rep in cat.get("poutres", {}):
                 p_item = cat["poutres"][p_rep]
+                # Ne pas ecraser les flags 'dimensions_manquantes'
+                if p_item.get("dimensions_manquantes"):
+                    continue
                 if p_item.get("b") is None:
                     p_item["b"] = larg
                 if p_item.get("h") is None:
                     p_item["h"] = haut
+
+        # --- TEXT ANALYZER (analyse profonde du PDF) ---
+        text_analysis = None
+        pdf_path = getattr(self, '_current_pdf_path', None)
+        if pdf_path:
+            try:
+                from core.text_analyzer import analyze_pdf_text_dual
+                ta_result = analyze_pdf_text_dual(pdf_path)
+                text_analysis = {
+                    "extraction_backend": ta_result.extraction_backend,
+                    "reversed_texts_corrected": ta_result.reversed_texts_corrected,
+                    "cartouche_excluded": ta_result.cartouche_excluded,
+                    "legend_detected": ta_result.legend_detected,
+                    "levels_detected": ta_result.levels_found,
+                    "total_elements_found": len(ta_result.elements),
+                    "ambiguous_cases": [
+                        {
+                            "text": ac.text,
+                            "reason": ac.reason,
+                            "x": ac.x,
+                            "y": ac.y,
+                            "page": ac.page,
+                        } for ac in ta_result.ambiguous_cases
+                    ],
+                    "inventory": ta_result.inventory,
+                }
+            except Exception as exc:
+                text_analysis = {"error": str(exc)}
+
+        # --- GEOMETRY ANALYZER (dessins vectoriels PDF) ---
+        geometry_analysis = None
+        if pdf_path:
+            try:
+                from core.geometry_analyzer import analyze_pdf_drawings
+                drawing_elements = analyze_pdf_drawings(pdf_path)
+                if drawing_elements:
+                    geometry_analysis = {
+                        "total_shapes": len(drawing_elements),
+                        "by_family": {},
+                        "elements": [],
+                    }
+                    for de in drawing_elements:
+                        fam = de.element_family
+                        geometry_analysis["by_family"][fam] = (
+                            geometry_analysis["by_family"].get(fam, 0) + 1
+                        )
+                        geometry_analysis["elements"].append({
+                            "reference": de.reference,
+                            "family": fam,
+                            "section_cm": de.section_cm,
+                            "length_m": de.length_m,
+                            "level": de.level,
+                            "confidence": de.confidence,
+                        })
+            except Exception as exc:
+                geometry_analysis = {"error": str(exc)}
+
+        # --- LEVEL CLUSTERING (attribution spatiale des niveaux) ---
+        level_clustering = None
+        all_words = getattr(self, '_all_words', [])
+        if all_words:
+            try:
+                from core.level_clustering import (
+                    cluster_elements_by_level, apply_level_assignments,
+                    summarize_by_level,
+                )
+                # Construire la liste d'elements pour le clustering
+                elem_for_clustering = []
+                for ref, spec in cat.get("semelles", {}).items():
+                    elem_for_clustering.append({
+                        "reference": ref, "family": "SEMELLE",
+                        "y": spec.get("y", 0), "page": spec.get("page", 1),
+                    })
+                for ref, spec in cat.get("poteaux", {}).items():
+                    elem_for_clustering.append({
+                        "reference": ref, "family": "POTEAU",
+                        "y": spec.get("y", 0), "page": spec.get("page", 1),
+                    })
+                for ref, spec in cat.get("poutres", {}).items():
+                    elem_for_clustering.append({
+                        "reference": ref, "family": "POUTRE",
+                        "y": spec.get("y", 0), "page": spec.get("page", 1),
+                    })
+                for ref, spec in cat.get("longrines", {}).items():
+                    elem_for_clustering.append({
+                        "reference": ref, "family": "LONGRINE",
+                        "y": spec.get("y", 0), "page": spec.get("page", 1),
+                    })
+                for ref, spec in cat.get("chainages", {}).items():
+                    elem_for_clustering.append({
+                        "reference": ref, "family": "CHAINAGE",
+                        "y": spec.get("y", 0), "page": spec.get("page", 1),
+                    })
+
+                if elem_for_clustering:
+                    clustering = cluster_elements_by_level(
+                        elem_for_clustering, words=all_words)
+                    apply_level_assignments(elem_for_clustering, clustering)
+                    level_summary = summarize_by_level(elem_for_clustering)
+                    level_clustering = {
+                        "zones": [
+                            {"level": z.level, "y_min": z.y_min,
+                             "y_max": z.y_max, "count": z.element_count}
+                            for z in clustering.zones
+                        ],
+                        "assignments": clustering.assignments,
+                        "ambiguous": clustering.ambiguous,
+                        "confidence": clustering.confidence,
+                        "summary_by_level": level_summary,
+                    }
+                    # Appliquer les niveaux detectes au catalogue
+                    for elem in elem_for_clustering:
+                        lvl = elem.get("level", "INCONNU")
+                        ref = elem.get("reference", "")
+                        fam = elem.get("family", "")
+                        if lvl != "INCONNU":
+                            if fam == "SEMELLE" and ref in cat.get("semelles", {}):
+                                cat["semelles"][ref]["level"] = lvl
+                            elif fam == "POTEAU" and ref in cat.get("poteaux", {}):
+                                cat["poteaux"][ref]["level"] = lvl
+                            elif fam == "POUTRE" and ref in cat.get("poutres", {}):
+                                cat["poutres"][ref]["level"] = lvl
+                            elif fam == "LONGRINE" and ref in cat.get("longrines", {}):
+                                cat["longrines"][ref]["level"] = lvl
+                            elif fam == "CHAINAGE" and ref in cat.get("chainages", {}):
+                                cat["chainages"][ref]["level"] = lvl
+            except Exception as exc:
+                level_clustering = {"error": str(exc)}
+
+        # --- CROSS-VALIDATION : comparaison tableaux vs elevation vs spatial ---
+        self._cross_validate_strategies(cat)
+
+        # --- RECLASSIFICATION LG/CH/BN depuis poutres vers les bons catalogues ---
+        _reclassified = set()
+        for key in list(cat.get("poutres", {}).keys()):
+            spec = cat["poutres"][key]
+            # Extraire le prefixe de base (avant _ si present)
+            base = key.split("_")[0] if "_" in key else key
+            prefix = (spec.get("prefix") or base).upper()
+            if prefix.startswith("LG") and "longrines" in cat:
+                cat["longrines"][key] = spec
+                _reclassified.add(key)
+            elif prefix.startswith("CH") and "chainages" in cat:
+                cat["chainages"][key] = spec
+                _reclassified.add(key)
+            elif prefix.startswith("BN") and "murs" in cat:
+                cat["murs"][key] = spec
+                _reclassified.add(key)
+        for key in _reclassified:
+            cat["poutres"].pop(key, None)
+
+        # --- Nettoyage des entrees fantomes ---
+        for catalogue_name in ("poutres", "longrines", "chainages", "murs"):
+            for key in list(cat.get(catalogue_name, {}).keys()):
+                spec = cat[catalogue_name][key]
+                # Entree composite avec prefix inconnu
+                if "_" in key and not spec.get("prefix"):
+                    base = key.split("_")[0]
+                    if not re.match(r"^(?:B?N\d+|PN\d+|PC\d*|LG\d*|CH\d*|BN\d*)$", base, re.I):
+                        cat[catalogue_name].pop(key, None)
+                        continue
+                # Entree bare avec composite counterpart -> toujours supprimer
+                # (le composite est plus informatif : N1_25x40 > N1)
+                if "_" not in key:
+                    has_composite = any(
+                        k.startswith(f"{key}_") for k in cat.get(catalogue_name, {}).keys())
+                    if has_composite:
+                        cat[catalogue_name].pop(key, None)
+
+        # --- ENRICHISSEMENT VIA SCHEDULE PARSER (LLM/regex) ---
+        # Parse les tableaux extraits pour enrichir le ferraillage et les dimensions
+        try:
+            from core.schedule_parser import parse_schedule_table, elements_to_catalogue
+            for page_num in self.pages_tableau:
+                doc = getattr(self, "_current_doc", None)
+                if doc is None:
+                    continue
+                try:
+                    page = doc[page_num - 1]
+                    tabs = page.find_tables()
+                    for t in tabs.tables:
+                        try:
+                            data = t.extract()
+                        except Exception:
+                            continue
+                        if not data or len(data) < 2:
+                            continue
+                        # Detecter le type de tableau
+                        table_text = " ".join(
+                            str(c or "") for row in data for c in row
+                        ).upper()
+                        table_type = ""
+                        if "SEMELLE" in table_text:
+                            table_type = "semelles"
+                        elif "POTEAU" in table_text or any(
+                            c and c.upper().startswith("Q") for row in data for c in row
+                        ):
+                            table_type = "poteaux"
+                        elif "POUTRE" in table_text or "LONGRINE" in table_text:
+                            table_type = "poutres"
+
+                        # Parser le tableau
+                        result = parse_schedule_table(
+                            data, table_type=table_type,
+                            page_num=page_num, use_llm=True
+                        )
+                        if result.get("elements"):
+                            parsed_cat = elements_to_catalogue(result["elements"])
+                            # Fusionner avec le catalogue existant
+                            for fam, items in parsed_cat.items():
+                                for ref, spec in items.items():
+                                    if ref not in cat.get(fam, {}):
+                                        cat.setdefault(fam, {})[ref] = spec
+                                    else:
+                                        # Enrichir les champs manquants
+                                        existing = cat[fam][ref]
+                                        for key in ("ferr_x", "ferr_y", "ferr_sup", "cadres"):
+                                            if key not in existing and key in spec:
+                                                existing[key] = spec[key]
+                except Exception as exc:
+                    logger.debug("Schedule parser error on page %d: %s", page_num, exc)
+        except ImportError:
+            pass
+
+        # --- RAPPORT METIER (regles metier genie civil) ---
+        metier_report = self._build_metier_report(cat)
 
         return {
             "projet": {"nom": "Projet extrait", "date": None},
@@ -2085,6 +2935,10 @@ class VectorPlanExtractor:
                 ],
                 "avertissements": self.warnings,
                 "hypotheses": self.hypotheses,
+                "rapport_metier": metier_report,
+                "text_analysis": text_analysis,
+                "geometry_analysis": geometry_analysis,
+                "level_clustering": level_clustering,
             },
         }
 
@@ -2166,23 +3020,152 @@ def is_raster_pdf(pdf_path):
 
 
 def extract_plan_auto(file_path, progress_callback=None):
-    """Routeur : DXF -> ingestion, PDF vectoriel -> vector, PDF raster /
-    image -> OCR local (si installe). Aucun fallback fictif nulle part."""
+    """Routeur multi-format : PDF, DXF, DWG, IFC, images.
+
+    Aucun fallback fictif nulle part.
+    """
     ext = Path(file_path).suffix.lower()
 
     try:
+        # --- PDF ---
         if ext == ".pdf":
-            # Le moteur vectoriel conserve le texte et ajoute l'OCR cible
-            # page par page pour les zones image/hybrides.
             return VectorPlanExtractor().process_all_pages(
                 file_path, progress_callback)
 
+        # --- Images ---
         if ext in (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"):
             raster = RasterPlanExtractor()
             words = raster.image_to_words(file_path)
             return VectorPlanExtractor().extract_from_words(words)
 
-        # DXF / autres : ingestion native.
+        # --- IFC (BIM) — methode la plus fiable ---
+        if ext == ".ifc":
+            try:
+                from core.ifc_extractor import (
+                    extract_from_ifc, ifc_elements_to_standard)
+                ifc_result = extract_from_ifc(file_path)
+                standard_elements = ifc_elements_to_standard(ifc_result)
+                # Construire le plan_data a partir des elements IFC
+                cat = {
+                    "semelles": {}, "poteaux": {}, "poutres": {},
+                    "dalles": {}, "voiles": {}, "escaliers": {},
+                    "longrines": {}, "chainages": {}, "murs": {},
+                    "radiers": {}, "contre_forts": {}, "futs": {},
+                    "semelles_filantes": [],
+                }
+                for elem in standard_elements:
+                    fam = elem.get("family", "")
+                    ref = elem.get("reference", "")
+                    dims = elem.get("dims_text")
+                    level = elem.get("level", "INCONNU")
+                    if fam == "SEMELLE" and dims:
+                        m = re.match(r"(\d+)[xX](\d+)(?:[xX](\d+))?", dims)
+                        if m:
+                            cat["semelles"][ref] = {
+                                "a": int(m.group(1)) / 100,
+                                "b": int(m.group(2)) / 100,
+                                "h": int(m.group(3)) / 100 if m.group(3) else 0,
+                                "level": level,
+                            }
+                    elif fam == "POTEAU" and dims:
+                        m = re.match(r"(\d+)[xX](\d+)", dims)
+                        if m:
+                            cat["poteaux"][ref] = {
+                                "a": int(m.group(1)) / 100,
+                                "b": int(m.group(2)) / 100,
+                                "level": level,
+                            }
+                    elif fam == "POUTRE" and dims:
+                        m = re.match(r"(\d+)[xX](\d+)", dims)
+                        if m:
+                            cat["poutres"][ref] = {
+                                "b": int(m.group(1)) / 100,
+                                "h": int(m.group(2)) / 100,
+                                "level": level,
+                            }
+                    elif fam == "LONGRINE" and dims:
+                        m = re.match(r"(\d+)[xX](\d+)", dims)
+                        if m:
+                            cat["longrines"][ref] = {
+                                "b": int(m.group(1)) / 100,
+                                "h": int(m.group(2)) / 100,
+                                "level": level,
+                            }
+                    elif fam == "CHAINAGE" and dims:
+                        m = re.match(r"(\d+)[xX](\d+)", dims)
+                        if m:
+                            cat["chainages"][ref] = {
+                                "b": int(m.group(1)) / 100,
+                                "h": int(m.group(2)) / 100,
+                                "level": level,
+                            }
+                # Construire le resultat final
+                extractor = VectorPlanExtractor()
+                extractor._reset()
+                extractor.global_catalogue = cat
+                extractor._all_words = [
+                    {"text": e.get("reference", ""), "x": e.get("x", 0),
+                     "y": e.get("y", 0), "page": 1}
+                    for e in standard_elements
+                ]
+                return extractor._finalize()
+            except ImportError:
+                return partial_plan_data(
+                    "ifcopenshell non installe — pip install ifcopenshell")
+
+        # --- DXF (avec nouveau extracteur geometrique) ---
+        if ext == ".dxf":
+            try:
+                from core.dxf_extractor import (
+                    extract_from_dxf, dxf_elements_to_standard)
+                dxf_result = extract_from_dxf(file_path)
+                standard_elements = dxf_elements_to_standard(dxf_result)
+                if standard_elements:
+                    return VectorPlanExtractor().extract_from_text_blocks(
+                        standard_elements)
+                # Fallback: ingestion classique
+                from core.ingestion import UniversalPlanIngestor
+                result = UniversalPlanIngestor(str(file_path)).ingest()
+                return VectorPlanExtractor().extract_from_text_blocks(
+                    result.text_blocks)
+            except ImportError:
+                from core.ingestion import UniversalPlanIngestor
+                result = UniversalPlanIngestor(str(file_path)).ingest()
+                return VectorPlanExtractor().extract_from_text_blocks(
+                    result.text_blocks)
+
+        # --- DWG (conversion vers DXF puis traitement DXF) ---
+        if ext == ".dwg":
+            try:
+                import subprocess
+                import tempfile
+                # Essayer dwg2dxf (ODA File Converter)
+                with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as tmp:
+                    tmp_dxf = tmp.name
+                result = subprocess.run(
+                    ["dwg2dxf", "-o", tmp_dxf, str(file_path)],
+                    capture_output=True, text=True, timeout=120)
+                if result.returncode == 0 and Path(tmp_dxf).exists():
+                    from core.dxf_extractor import (
+                        extract_from_dxf, dxf_elements_to_standard)
+                    dxf_result = extract_from_dxf(tmp_dxf)
+                    standard_elements = dxf_elements_to_standard(dxf_result)
+                    Path(tmp_dxf).unlink(missing_ok=True)
+                    if standard_elements:
+                        return VectorPlanExtractor().extract_from_text_blocks(
+                            standard_elements)
+                # Fallback: ingestion classique
+                from core.ingestion import UniversalPlanIngestor
+                result = UniversalPlanIngestor(str(file_path)).ingest()
+                return VectorPlanExtractor().extract_from_text_blocks(
+                    result.text_blocks)
+            except Exception:
+                from core.ingestion import UniversalPlanIngestor
+                result = UniversalPlanIngestor(str(file_path)).ingest()
+                return VectorPlanExtractor().extract_from_text_blocks(
+                    result.text_blocks)
+
+        # --- Autres formats : ingestion native ---
         from core.ingestion import UniversalPlanIngestor
         result = UniversalPlanIngestor(str(file_path)).ingest()
         return VectorPlanExtractor().extract_from_text_blocks(result.text_blocks)

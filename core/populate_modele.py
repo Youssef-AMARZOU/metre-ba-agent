@@ -73,11 +73,12 @@ def _safe_list(value):
 def _normalise_payload(plan_data):
     source = _safe_dict(plan_data)
     result = {"projet": source.get("projet", "Projet BTP")}
-    for family in ("semelles", "poteaux", "poutres"):
+    for family in ("semelles", "poteaux", "poutres", "longrines",
+                   "chainages", "murs", "voiles"):
         result[family] = []
         for raw in _safe_list(source.get(family)):
             item = _safe_dict(raw).copy()
-            for name in ("a", "b", "h", "hauteur", "portee"):
+            for name in ("a", "b", "h", "hauteur", "portee", "ep"):
                 if name in item and item[name] is not None:
                     item[name] = _safe_float(item[name])
             for name in ("phi", "nb_x", "nb_y"):
@@ -188,7 +189,8 @@ def _formules_acier(col_diam, row, col_g="G", col_h="H", col_j="J",
 # FEUILLE 1 : 01_Detail_Quantitatif
 # ============================================================================
 
-def _remplir_detail(ws, semelles, poteaux):
+def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
+                    chainages=None, murs=None, voiles=None):
     """Reconstruit la zone de donnees (des la ligne 7).
     Retourne les lignes de sous-totaux pour les liens de la feuille 4."""
     NCOLS = 11
@@ -226,6 +228,57 @@ def _remplir_detail(ws, semelles, poteaux):
                float(p.get("a", 0)), float(p.get("b", 0)),
                float(p.get("hauteur", 3.0)))
               for p in poteaux]))
+
+    # Poutres
+    if poutres:
+        articles.append(
+            ("Béton pour poutres",
+             [(p.get("axe", ""), "",
+               f"Poutre {p.get('type', '?')}", "M3", 1,
+               float(p.get("b", 0)), float(p.get("h", 0)),
+               float(p.get("portee") or 3.5))
+              for p in poutres]))
+
+    # Longrines
+    if longrines:
+        articles.append(
+            ("Béton pour longrines",
+             [(l.get("axe", ""), "",
+               f"Longrine {l.get('type', '?')}", "M3", 1,
+               float(l.get("b", 0)), float(l.get("h", 0)),
+               float(l.get("portee") or 3.5))
+              for l in longrines]))
+
+    # Chainages
+    if chainages:
+        articles.append(
+            ("Béton pour chaînages",
+             [(c.get("axe", ""), "",
+               f"Chaînage {c.get('type', '?')}", "M3", 1,
+               float(c.get("b", 0)), float(c.get("h", 0)),
+               float(c.get("portee") or 3.5))
+              for c in chainages]))
+
+    # Murs (bandes noyees)
+    if murs:
+        articles.append(
+            ("Béton pour bandes noyées",
+             [(m.get("axe", ""), "",
+               f"BN {m.get('type', '?')}", "M3", 1,
+               float(m.get("b", 0)), float(m.get("h", 0)),
+               float(m.get("portee") or 3.5))
+              for m in murs]))
+
+    # Voiles
+    if voiles:
+        articles.append(
+            ("Béton pour voiles",
+             [(v.get("axe", ""), "",
+               f"Voile {v.get('type', '?')}", "M3", 1,
+               float(v.get("ep", 0.20)),
+               float(v.get("hauteur", 3.0)),
+               1.0)
+              for v in voiles]))
 
     row = 7
     subs = {}
@@ -521,7 +574,11 @@ def injecter_metre_dans_modele(plan_data: dict, template_path: str,
     plan_data = _normalise_payload(plan_data)
     semelles = plan_data["semelles"]
     poteaux = plan_data["poteaux"]
-    poutres = plan_data["poutres"]
+    poutres = plan_data.get("poutres", [])
+    longrines = plan_data.get("longrines", [])
+    chainages = plan_data.get("chainages", [])
+    murs = plan_data.get("murs", [])
+    voiles = plan_data.get("voiles", [])
     nom_projet = plan_data.get("projet", "Projet BTP")
 
     ws1 = wb["01_Detail_Quantitatif"]
@@ -531,7 +588,8 @@ def injecter_metre_dans_modele(plan_data: dict, template_path: str,
                 set_cell_safe(ws1, r, c + 1, nom_projet)
                 break
 
-    info1 = _remplir_detail(ws1, semelles, poteaux)
+    info1 = _remplir_detail(ws1, semelles, poteaux, poutres, longrines,
+                            chainages, murs, voiles)
     from openpyxl.utils import get_column_letter
     info2 = _remplir_armatures(ws1 and wb["02_Armatures"], semelles,
                                poteaux, poutres)

@@ -50,7 +50,8 @@ def _normalise_plan_data(plan_data):
     """Normalise les donnees OCR avant tout calcul Excel."""
     source = _safe_dict(plan_data)
     catalogue_source = _safe_dict(source.get("catalogue_types"))
-    catalogue = {"semelles": {}, "poteaux": {}, "poutres": {}}
+    catalogue = {"semelles": {}, "poteaux": {}, "poutres": {},
+                 "longrines": {}, "chainages": {}, "murs": {}, "voiles": {}}
     for family in catalogue:
         for key, raw in _safe_dict(catalogue_source.get(family)).items():
             dims = _safe_dict(raw).copy()
@@ -879,7 +880,7 @@ def resoudre_chemin_template(base_dir=None):
 
 def adapter_plan_vers_injecteur(plan_data: dict) -> dict:
     """Convertit plan_data (catalogue_types + implantations) vers le format
-    plat de l'injecteur : semelles/poteaux/poutres positionnes + projet."""
+    plat de l'injecteur : semelles/poteaux/poutres/longrines/chainages/murs/voiles."""
     plan_data = _normalise_plan_data(plan_data)
     projet = plan_data.get("projet", "Projet BTP")
     if isinstance(projet, dict):
@@ -909,36 +910,109 @@ def adapter_plan_vers_injecteur(plan_data: dict) -> dict:
 
     poteaux = []
     cat_pot = catalogue.get("poteaux", {})
-    for inst in impl.get("poteaux", []):
-        dims = cat_pot.get(inst.get("type", ""), {})
+    for ref, dims in cat_pot.items():
+        dims = _safe_dict(dims)
         poteaux.append({
-            "type": inst.get("type", ""),
-            "axe": inst.get("axe", ""),
-            "file": inst.get("file", ""),
+            "type": ref,
+            "axe": dims.get("axe", ""),
+            "file": dims.get("file", ""),
             "a": dims.get("a", 0),
             "b": dims.get("b", 0),
-            "hauteur": inst.get("hauteur", 3.0),
+            "hauteur": dims.get("hauteur", 3.0),
             "long_bars": dims.get("long_bars", []) or [],
             "cadres": dims.get("cadres", {}) or {},
         })
 
     poutres = []
     cat_pou = catalogue.get("poutres", {})
-    for inst in impl.get("poutres", []):
-        dims = cat_pou.get(inst.get("type", ""), {})
+    for ref, dims in cat_pou.items():
+        dims = _safe_dict(dims)
+        # Ignorer les entrees sans dimensions
+        if not dims.get("b") and not dims.get("h"):
+            continue
         poutres.append({
-            "type": inst.get("type", ""),
-            "axe": inst.get("axe", ""),
+            "type": ref,
+            "axe": dims.get("axe", ""),
             "b": dims.get("b", 0),
             "h": dims.get("h", 0),
-            "portee": inst.get("portee"),
+            "portee": dims.get("longueur") or dims.get("portee"),
             "filants_inf": dims.get("filants_inf", []) or [],
             "filants_sup": dims.get("filants_sup", []) or [],
             "cadres": dims.get("cadres", {}) or {},
         })
 
-    return {"projet": projet, "semelles": semelles,
-            "poteaux": poteaux, "poutres": poutres}
+    # Longrines (traitees comme poutres pour le metre)
+    longrines = []
+    cat_lr = catalogue.get("longrines", {})
+    for ref, dims in cat_lr.items():
+        dims = _safe_dict(dims)
+        b = dims.get("b") or dims.get("a") or 0
+        h = dims.get("h") or 0
+        if not b:
+            continue
+        longrines.append({
+            "type": ref,
+            "axe": dims.get("axe", ""),
+            "b": b,
+            "h": h,
+            "portee": dims.get("longueur") or dims.get("portee"),
+        })
+
+    # Chainages (traitees comme poutres pour le metre)
+    chainages = []
+    cat_ch = catalogue.get("chainages", {})
+    for ref, dims in cat_ch.items():
+        dims = _safe_dict(dims)
+        b = dims.get("b") or dims.get("a") or 0
+        h = dims.get("h") or 0
+        if not b:
+            continue
+        chainages.append({
+            "type": ref,
+            "axe": dims.get("axe", ""),
+            "b": b,
+            "h": h,
+            "portee": dims.get("longueur") or dims.get("portee"),
+        })
+
+    # Murs (bandes noyees)
+    murs = []
+    cat_mur = catalogue.get("murs", {})
+    for ref, dims in cat_mur.items():
+        dims = _safe_dict(dims)
+        b = dims.get("b") or dims.get("a") or 0
+        h = dims.get("h") or 0
+        if not b:
+            continue
+        murs.append({
+            "type": ref,
+            "axe": dims.get("axe", ""),
+            "b": b,
+            "h": h,
+            "portee": dims.get("longueur") or dims.get("portee"),
+        })
+
+    # Voiles
+    voiles = []
+    cat_vol = catalogue.get("voiles", {})
+    for ref, dims in cat_vol.items():
+        dims = _safe_dict(dims)
+        voiles.append({
+            "type": ref,
+            "ep": dims.get("ep", dims.get("b", 0)),
+            "hauteur": dims.get("hauteur", 3.0),
+        })
+
+    return {
+        "projet": projet,
+        "semelles": semelles,
+        "poteaux": poteaux,
+        "poutres": poutres,
+        "longrines": longrines,
+        "chainages": chainages,
+        "murs": murs,
+        "voiles": voiles,
+    }
 
 
 def generer_via_gabarit(plan_data: dict, output_path: str,
@@ -951,11 +1025,227 @@ def generer_via_gabarit(plan_data: dict, output_path: str,
     try:
         template = resoudre_chemin_template(base_dir)
         payload = adapter_plan_vers_injecteur(plan_data)
-        return injecter_metre_dans_modele(payload, template, output_path)
+        result_path = injecter_metre_dans_modele(payload, template, output_path)
+        # Ajouter la feuille rapport metier
+        _ajouter_feuille_rapport_metier(result_path, plan_data)
+        return result_path
     except Exception as e:
         print(f"⚠ Pont gabarit indisponible ({e}) — repli historique.")
         gen = MetreGenerator(plan_data, moteur="historique")
         return gen.generer(output_path)
+
+
+def _ajouter_feuille_rapport_metier(xlsx_path: str, plan_data: dict):
+    """Ajoute une feuille 'Rapport Metier' au classeur Excel."""
+    import openpyxl
+    from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    rapport = plan_data.get("_meta", {}).get("rapport_metier")
+    if not rapport:
+        return
+
+    wb = openpyxl.load_workbook(xlsx_path)
+    if "05_Rapport_Metier" in wb.sheetnames:
+        del wb["05_Rapport_Metier"]
+
+    ws = wb.create_sheet("05_Rapport_Metier")
+
+    # Styles
+    header_font = Font(bold=True, size=12, color="FFFFFF")
+    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+    section_font = Font(bold=True, size=11, color="1F4E79")
+    normal_font = Font(size=10)
+    warn_font = Font(size=10, color="CC0000")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"))
+
+    row = 1
+
+    # --- En-tete ---
+    ws.cell(row, 1, "RAPPORT METIER — GENIE CIVIL / BETON ARME").font = Font(bold=True, size=14, color="1F4E79")
+    row += 1
+
+    if rapport.get("revision_index"):
+        ws.cell(row, 1, f"Indice : {rapport['revision_index']}").font = normal_font
+        row += 1
+    if rapport.get("revision_date"):
+        ws.cell(row, 1, f"Date : {rapport['revision_date']}").font = normal_font
+        row += 1
+    row += 1
+
+    # --- Hypotheses reglementaires ---
+    ws.cell(row, 1, "HYPOTHESES REGLEMENTAIRES").font = section_font
+    row += 1
+    if rapport.get("regulatory_hypotheses"):
+        for h in rapport["regulatory_hypotheses"]:
+            ws.cell(row, 1, h["category"]).font = normal_font
+            ws.cell(row, 2, h["value"]).font = normal_font
+            row += 1
+    else:
+        ws.cell(row, 1, "Aucune hypothese detectee dans le cartouche.").font = normal_font
+        row += 1
+    row += 1
+
+    # --- Ecarts plan/tableaux ---
+    ws.cell(row, 1, "ECARTS PLAN / TABLEAUX RECAPITULATIFS").font = section_font
+    row += 1
+    if rapport.get("discrepancies"):
+        headers = ["Prefixe", "Famille", "Plan (rep.)", "Tableau (lignes)", "Absents tableau", "Absents plan", "Severite"]
+        for c, h in enumerate(headers, 1):
+            cell = ws.cell(row, c, h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = thin_border
+        row += 1
+        for d in rapport["discrepancies"]:
+            ws.cell(row, 1, d["prefix"]).font = normal_font
+            ws.cell(row, 2, d["family"]).font = normal_font
+            ws.cell(row, 3, d["plan_count"]).font = normal_font
+            ws.cell(row, 4, d["table_count"]).font = normal_font
+            ws.cell(row, 5, ", ".join(d.get("missing_in_table", []))).font = warn_font
+            ws.cell(row, 6, ", ".join(d.get("missing_in_plan", []))).font = warn_font
+            ws.cell(row, 7, d["severity"]).font = warn_font if d["severity"] == "ERROR" else normal_font
+            for c in range(1, 8):
+                ws.cell(row, c).border = thin_border
+            row += 1
+    else:
+        ws.cell(row, 1, "Aucun ecart detecte.").font = normal_font
+        row += 1
+    row += 1
+
+    # --- Lineaire par type ---
+    ws.cell(row, 1, "LINEAIRE PAR TYPE").font = section_font
+    row += 1
+    if rapport.get("linears"):
+        headers = ["Reference", "Famille", "Section (cm)", "Niveau", "Nb occ.", "Long. (m)", "Total (m)"]
+        for c, h in enumerate(headers, 1):
+            cell = ws.cell(row, c, h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = thin_border
+        row += 1
+        for lin in rapport["linears"]:
+            ws.cell(row, 1, lin["reference"]).font = normal_font
+            ws.cell(row, 2, lin["family"]).font = normal_font
+            sec = f"{lin['section_cm'][0]}x{lin['section_cm'][1]}" if lin.get("section_cm") else "-"
+            ws.cell(row, 3, sec).font = normal_font
+            ws.cell(row, 4, lin["level"]).font = normal_font
+            ws.cell(row, 5, lin["count"]).font = normal_font
+            ws.cell(row, 6, round(lin["length_m"], 2)).font = normal_font
+            ws.cell(row, 7, round(lin["length_m"] * lin["count"], 2)).font = normal_font
+            for c in range(1, 8):
+                ws.cell(row, c).border = thin_border
+            row += 1
+    row += 1
+
+    # --- Volume beton ---
+    ws.cell(row, 1, "VOLUME BETON ESTIME").font = section_font
+    row += 1
+    if rapport.get("concrete_volumes"):
+        headers = ["Reference", "Famille", "Section (cm)", "Niveau", "Nb", "Long. (m)", "Volume (m3)"]
+        for c, h in enumerate(headers, 1):
+            cell = ws.cell(row, c, h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = thin_border
+        row += 1
+        total_vol = 0.0
+        for cv in rapport["concrete_volumes"]:
+            if cv.get("volume_m3", 0) > 0:
+                ws.cell(row, 1, cv["reference"]).font = normal_font
+                ws.cell(row, 2, cv["family"]).font = normal_font
+                sec = f"{cv['section_cm'][0]}x{cv['section_cm'][1]}" if cv.get("section_cm") else "-"
+                ws.cell(row, 3, sec).font = normal_font
+                ws.cell(row, 4, cv["level"]).font = normal_font
+                ws.cell(row, 5, cv["count"]).font = normal_font
+                ws.cell(row, 6, round(cv["length_m"], 2)).font = normal_font
+                ws.cell(row, 7, round(cv["volume_m3"], 4)).font = normal_font
+                for c in range(1, 8):
+                    ws.cell(row, c).border = thin_border
+                total_vol += cv["volume_m3"]
+                row += 1
+        ws.cell(row, 1, "TOTAL").font = Font(bold=True, size=11)
+        ws.cell(row, 7, round(total_vol, 3)).font = Font(bold=True, size=11)
+        for c in range(1, 8):
+            ws.cell(row, c).border = thin_border
+        row += 1
+    row += 1
+
+    # --- Sections sans ferraillage ---
+    ws.cell(row, 1, "SECTIONS SANS DETAIL DE FERRAILLAGE").font = section_font
+    row += 1
+    if rapport.get("missing_ferraillage"):
+        headers = ["Reference", "Famille", "Section", "Niveau"]
+        for c, h in enumerate(headers, 1):
+            cell = ws.cell(row, c, h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = thin_border
+        row += 1
+        for mf in rapport["missing_ferraillage"]:
+            ws.cell(row, 1, mf["reference"]).font = normal_font
+            ws.cell(row, 2, mf["family"]).font = normal_font
+            ws.cell(row, 3, mf["section_text"]).font = normal_font
+            ws.cell(row, 4, mf["level"]).font = normal_font
+            for c in range(1, 5):
+                ws.cell(row, c).border = thin_border
+            row += 1
+    else:
+        ws.cell(row, 1, "Toutes les sections ont un detail de ferraillage.").font = normal_font
+        row += 1
+    row += 1
+
+    # --- Avertissements ---
+    all_warnings = rapport.get("warnings", [])
+    if all_warnings:
+        ws.cell(row, 1, "AVERTISSEMENTS").font = section_font
+        row += 1
+        for w in all_warnings[:20]:
+            ws.cell(row, 1, w).font = warn_font
+            row += 1
+
+    # --- Analyse geometrique ---
+    geometry_analysis = plan_data.get("_meta", {}).get("geometry_analysis", {})
+    if geometry_analysis and not geometry_analysis.get("error"):
+        row += 1
+        ws.cell(row, 1, "ANALYSE GEOMETRIQUE (DESSINS)").font = section_font
+        row += 1
+        ws.cell(row, 1, "Formes detectees").font = normal_font
+        ws.cell(row, 2, geometry_analysis.get("total_shapes", 0)).font = normal_font
+        row += 1
+        by_fam = geometry_analysis.get("by_family", {})
+        if by_fam:
+            for fam, count in by_fam.items():
+                ws.cell(row, 1, f"  {fam}").font = normal_font
+                ws.cell(row, 2, count).font = normal_font
+                row += 1
+
+    # --- Clustering spatial par niveau ---
+    level_clustering = plan_data.get("_meta", {}).get("level_clustering", {})
+    if level_clustering and not level_clustering.get("error"):
+        row += 1
+        ws.cell(row, 1, "CLUSTERING SPATIAL PAR NIVEAU").font = section_font
+        row += 1
+        ws.cell(row, 1, "Confiance").font = normal_font
+        ws.cell(row, 2, f"{level_clustering.get('confidence', 0):.0%}").font = normal_font
+        row += 1
+        zones = level_clustering.get("zones", [])
+        if zones:
+            for z in zones:
+                if z.get("count", 0) > 0:
+                    ws.cell(row, 1, f"  {z['level']}").font = normal_font
+                    ws.cell(row, 2, f"{z['count']} elements").font = normal_font
+                    row += 1
+
+    # Ajuster largeur colonnes
+    for col in range(1, 8):
+        letter = get_column_letter(col)
+        ws.column_dimensions[letter].width = 20
+
+    wb.save(xlsx_path)
+    print(f"Feuille 'Rapport Metier' ajoutee : {xlsx_path}")
 
 
 # ============================================================================
