@@ -1,0 +1,68 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable
+        run: |
+          pyinstaller --noconfirm --clean --distpath dist --workpath build --specpath . --windowed --name PlanBA_Metre_Extractor --add-data "assets;assets" --add-data "templates;templates" --add-data "reference;reference" --add-data "core;core" --collect-all customtkinter --hidden-import rapidocr_onnxruntime --hidden-import openpyxl --hidden-import PyMuPDF --hidden-import shapely --hidden-import cv2 --hidden-import numpy --hidden-import pytesseract --hidden-import chromadb --hidden-import sentence_transformers --hidden-import torch main.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlanBA_Metre_Extractor
+          path: dist/PlanBA_Metre_Extractor/
+
+  release:
+    needs: build
+    runs-on: windows-latest
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: PlanBA_Metre_Extractor
+          path: dist/PlanBA_Metre_Extractor/
+
+      - name: Create zip
+        run: Compress-Archive -Path dist/PlanBA_Metre_Extractor/* -DestinationPath PlanBA_Metre_Extractor.zip
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: PlanBA Metre Extractor v${{ github.run_number }}
+          body: |
+            Build from commit ${{ github.sha }}
+            - RAG knowledge base (ChromaDB + sentence-transformers)
+            - Schedule parser with 25+ civil engineering families
+            - Correction view with CRUD (add/delete rows)
+          files: PlanBA_Metre_Extractor.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
