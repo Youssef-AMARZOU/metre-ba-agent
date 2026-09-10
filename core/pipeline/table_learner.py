@@ -119,8 +119,6 @@ class TableLearner:
             return {}
 
         result = {}
-        SECTION_CM_RX = re.compile(r"(\d{2,3})\s*\n\s*(\d{2,3})")
-        FERRA_RX = re.compile(r"(\d+)\s*([THA])\s*(\d+)", re.I)
 
         for ci, repere in repere_cols.items():
             row_data = {}
@@ -131,38 +129,34 @@ class TableLearner:
                 if not cell.strip():
                     continue
 
-                # Normaliser le texte
-                cell_norm = re.sub(r"\s+", " ", cell).strip()
+                # Extraire la section: chercher explicitement les lignes "25\n30" ou "25 30"
+                # qui sont les dimensions en cm (apres le ferraillage)
+                lines = [l.strip() for l in cell.split("\n") if l.strip()]
+                a_cm = None
+                b_cm = None
+                ferr_text = None
 
-                # Extraire la section
-                sm = SECTION_CM_RX.search(cell)
-                if not sm:
-                    # Fallback: chercher "25 30" ou "25\n30"
-                    sm = re.search(r"\b(\d{2,3})\s+(\d{2,3})\b", cell_norm)
-                    if sm and int(sm.group(1)) > 10 and int(sm.group(2)) > 10:
-                        a_cm = int(sm.group(1))
-                        b_cm = int(sm.group(2))
-                        row_data["section"] = Evidence(
-                            value=f"{a_cm}x{b_cm}",
-                            source_type=SourceType.LU,
-                            source_location=f"table_transposed/col{ci}/row{ri}",
-                            page=page,
-                        )
-                        row_data["a"] = Evidence(
-                            value=a_cm / 100,
-                            source_type=SourceType.CALCULE,
-                            source_location=f"table_transposed/col{ci}/a",
-                            page=page,
-                        )
-                        row_data["b"] = Evidence(
-                            value=b_cm / 100,
-                            source_type=SourceType.CALCULE,
-                            source_location=f"table_transposed/col{ci}/b",
-                            page=page,
-                        )
-                elif sm:
-                    a_cm = int(sm.group(1))
-                    b_cm = int(sm.group(2))
+                for li, line in enumerate(lines):
+                    # Chercher le ferraillage: "8T12", "12T12", "14T14", etc.
+                    fm = re.match(r"^(\d+)\s*([THA])\s*(\d+)", line, re.I)
+                    if fm:
+                        ferr_text = f"{fm.group(1)}{fm.group(2).upper()}{fm.group(3)}"
+                        continue
+
+                    # Chercher la section: nombre a 2 chiffres sur une ligne seule
+                    # "25" ou "30" (pas "12" qui est du ferraillage)
+                    if re.match(r"^\d{2,3}$", line):
+                        val = int(line)
+                        if 15 <= val <= 80:  # Dimensions de poteau raisonnables
+                            if a_cm is None:
+                                a_cm = val
+                            elif b_cm is None:
+                                b_cm = val
+
+                if a_cm and b_cm:
+                    # S'assurer que a <= b (convention)
+                    if a_cm > b_cm:
+                        a_cm, b_cm = b_cm, a_cm
                     row_data["section"] = Evidence(
                         value=f"{a_cm}x{b_cm}",
                         source_type=SourceType.LU,
@@ -182,10 +176,7 @@ class TableLearner:
                         page=page,
                     )
 
-                # Extraire le ferraillage
-                fm = FERRA_RX.search(cell)
-                if fm:
-                    ferr_text = f"{fm.group(1)}{fm.group(2).upper()}{fm.group(3)}"
+                if ferr_text:
                     row_data["ferraillage"] = Evidence(
                         value=ferr_text,
                         source_type=SourceType.LU,

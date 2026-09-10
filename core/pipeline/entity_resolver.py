@@ -61,9 +61,17 @@ class EntityResolver:
                 seen[key] = inst
                 unique_instances.append(inst)
             else:
-                # Fusionner les observations
                 existing = seen[key]
+                # Fusionner les observations
                 existing.observations.extend(inst.observations)
+                # Transferer les dimensions manquantes
+                for dim_key, dim_val in inst.dimensions.items():
+                    if dim_key not in existing.dimensions:
+                        existing.dimensions[dim_key] = dim_val
+                # Transferer le ferraillage manquant
+                for ferr_key, ferr_val in inst.ferraillage.items():
+                    if ferr_key not in existing.ferraillage:
+                        existing.ferraillage[ferr_key] = ferr_val
         return unique_instances
 
     def _cluster_observations(self, obs_list: list[Observation]) -> list[list[Observation]]:
@@ -107,7 +115,7 @@ class EntityResolver:
         # Dimensions depuis les annotations inline
         for obs in obs_list:
             section = obs.raw_data.get("section_inline")
-            if section:
+            if section and "section" not in inst.dimensions:
                 parts = section.split("x")
                 if len(parts) == 2:
                     try:

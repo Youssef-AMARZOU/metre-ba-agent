@@ -166,6 +166,8 @@ class LegendLearner:
             # Regex ultra-generique si aucune legende
             return re.compile(r"\b([A-Za-z]{1,5})(\d{1,3})\b")
 
+        # Pattern: prefixe suivi de numero (ex: N3, P2, S1)
+        # Le numero doit etre directement apres le prefixe (pas de tiret/parenthese)
         pattern = r"\b(" + "|".join(re.escape(p) for p in prefixes) + r")(\d{1,3})\b"
         return re.compile(pattern)
 

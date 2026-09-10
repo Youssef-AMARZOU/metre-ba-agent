@@ -27,11 +27,13 @@ class ElementScanner:
         re.I,
     )
 
-    def __init__(self, legend_regex: re.Pattern = None):
+    def __init__(self, legend_regex: re.Pattern = None,
+                 bare_prefixes: list[str] = None):
         """Initialisation avec la regex dynamique de la legende."""
         self.legend_regex = legend_regex or re.compile(
             r"\b([A-Za-z]{1,5})(\d{1,3})\b"
         )
+        self._bare_prefixes = bare_prefixes or []
 
     def scan_page(self, page, page_num: int) -> list[Observation]:
         """Scanne une page pour detecter les elements structuraux."""
@@ -58,7 +60,8 @@ class ElementScanner:
                         continue
 
                     # Detecter les repetes avec la regex dynamique
-                    matches = self.legend_regex.finditer(text)
+                    matches = list(self.legend_regex.finditer(text))
+
                     for m in matches:
                         prefix = m.group(1)
                         number = m.group(2)
@@ -96,6 +99,43 @@ class ElementScanner:
                             },
                         ))
                         obs_counter += 1
+
+                    # Aussi detecter les labels sans numero (ex: BN, CH)
+                    # dans le format "BN-(25X30)" ou "CH-(40X20)"
+                    if not matches and self._bare_prefixes:
+                        for prefix in self._bare_prefixes:
+                            if re.search(r"\b" + re.escape(prefix) + r"\b", text, re.I):
+                                section = None
+                                sm = self.SECTION_RX.search(text)
+                                if not sm:
+                                    sm = self.SECTION_DASH_RX.search(text)
+                                if sm:
+                                    section = f"{sm.group(1)}x{sm.group(2)}"
+
+                                ferr = None
+                                fm = self.FERRAILLAGE_RX.search(text)
+                                if fm:
+                                    ferr = f"{fm.group(1)}{fm.group(2).upper()}{fm.group(3)}"
+
+                                observations.append(Observation(
+                                    obs_id=f"p{page_num}_obs{obs_counter}",
+                                    text=text,
+                                    page=page_num,
+                                    x=(bbox[0] + bbox[2]) / 2,
+                                    y=(bbox[1] + bbox[3]) / 2,
+                                    x2=bbox[2],
+                                    y2=bbox[3],
+                                    obs_type="element_label",
+                                    raw_data={
+                                        "repere": prefix,
+                                        "prefix": prefix,
+                                        "number": "",
+                                        "section_inline": section,
+                                        "ferr_inline": ferr,
+                                    },
+                                ))
+                                obs_counter += 1
+                                break
 
         return observations
 
