@@ -137,28 +137,28 @@ def run_cli(input_path, output_dir=None, projet_nom=None):
             json.dump(plan_data, f, ensure_ascii=False, indent=2)
         raise
 
-    # --- Zero-Miss : extraction multi-pass pour BA ---
+    # --- Pipeline modular : extraction zero-miss ---
     if input_ext == ".pdf":
         try:
-            from core.zero_miss_extractor import run_zero_miss_extraction
-            print("  [Zero-Miss] Extraction multi-pass...")
-            zm_result = run_zero_miss_extraction(input_path)
-            zm_elements = (
-                zm_result.get("poteaux", []) +
-                zm_result.get("poutres", []) +
-                zm_result.get("longrines", []) +
-                zm_result.get("chainages", []) +
-                zm_result.get("murs", []) +
-                zm_result.get("semelles", []) +
-                zm_result.get("voiles", []) +
-                zm_result.get("autres", [])
-            )
-            print(f"  [Zero-Miss] {len(zm_elements)} elements extraits")
-            for w in zm_result.get("warnings", []):
-                print(f"  [Zero-Miss] {w}")
-            plan_data["_zero_miss"] = zm_result
+            from core.pipeline.runner import PipelineRunner
+            print("  [Pipeline] Extraction modular zero-miss...")
+            runner = PipelineRunner(verbose=False)
+            pipeline_report = runner.run(input_path)
+            stats = pipeline_report.get("rapport", {}).get("statistiques", {})
+            print(f"  [Pipeline] {stats.get('total_instances', 0)} instances, "
+                  f"{stats.get('instances_completes', 0)} completes")
+            print(f"  [Pipeline] Etat: {pipeline_report['validation']['etat']}")
+            plan_data["_pipeline_report"] = pipeline_report
         except Exception as e:
-            print(f"  [Zero-Miss] Erreur: {e}")
+            print(f"  [Pipeline] Erreur: {e}")
+            # Fallback vers l'extracteur legacy
+            try:
+                from core.zero_miss_extractor import run_zero_miss_extraction
+                print("  [Zero-Miss] Fallback extraction legacy...")
+                zm_result = run_zero_miss_extraction(input_path)
+                plan_data["_zero_miss"] = zm_result
+            except Exception as e2:
+                print(f"  [Zero-Miss] Erreur: {e2}")
 
     with open(plan_json, "w", encoding="utf-8") as f:
         json.dump(plan_data, f, ensure_ascii=False, indent=2)
