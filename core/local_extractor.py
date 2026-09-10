@@ -1819,36 +1819,40 @@ class VectorPlanExtractor:
         return n_impl
 
     # ------------------------------------------------------------------
-    # Details poteaux (hors tableaux)
+    # Details poteaux (hors tableaux + tableaux structures)
     # ------------------------------------------------------------------
     def _extract_poteaux_page(self, words, page_num):
         labels = [w for w in words if POTEAU_LABEL_RX.match(w["text"])]
+
+        # --- Phase 1 : detecter les tableaux structures de poteaux ---
+        # Si plusieurs P-labels sont alignes horizontalement (meme y +/- 15px),
+        # on traite comme un tableau : les valeurs sont en colonnes en dessous.
+        self._extract_poteaux_tableau(labels, words, page_num)
+
+        # --- Phase 2 : extraction individuelle (zone etroite) pour les
+        # labels non encore resolves ---
         for lab in labels:
             tk = POTEAU_LABEL_RX.match(lab["text"]).group(1).upper()
-            # Si le poteau existe deja avec des donnees, on ne re-ecrase pas.
-            # Mais si le spec est vide (grille spatiale sans dims), on tente
-            # d'enrichir depuis les annotations proches.
             existing = self.global_catalogue["poteaux"].get(tk)
             if existing and existing.get("a"):
                 continue
             spec = {}
             zone = [w for w in words
                     if abs(w["x"] - lab["x"]) < 145
-                    and abs(w["y"] - lab["y"]) < 50]
+                    and abs(w["y"] - lab["y"]) < 80]
             for w in zone:
                 m = POTEAU_DIM_RX.match(w["text"])
                 if m and "a" not in spec:
                     spec["a"] = _dim_cm_to_m(int(m.group(1)))
                     spec["b"] = _dim_cm_to_m(int(m.group(2)))
                     spec["section_str"] = f"{m.group(1)}x{m.group(2)}"
-                # Groupes d'armatures : 8T12 / 4T12+4T10 / 6HA14
                 bars = _dedupe_bars(
                     [{"nb": int(g.group(1)), "phi": int(g.group(2))}
                      for g in re.finditer(
                          r"(\d+)\s*(?:HA|T)\s*(\d+)", w["text"], re.I)])
                 if bars and "long_bars" not in spec:
                     spec["aciers_longitudinaux"] = bars
-                    spec["long_bars"] = bars  # compat aval
+                    spec["long_bars"] = bars
                 m_c = CADRE_RX.match(w["text"])
                 m_ep = CADRE_EP_RX.match(w["text"])
                 if (m_c or m_ep) and "cadres" not in spec:
@@ -1876,6 +1880,119 @@ class VectorPlanExtractor:
                         f"{tk}: espacement cadres non detecte — a verifier.")
                     spec["cadres"]["esp"] = 0.0
                 self._merge_poteau(tk, spec)
+
+    def _extract_poteaux_tableau(self, labels, words, page_num):
+        """Detecte les tableaux de poteaux structures (P1 P2 P3... en rangee)
+        et extrait les dimensions depuis les colonnes en dessous.
+
+        Format type A0 :
+            P1    P2    P3    P4    P5    P6     (en-tetes, y ~ Y0)
+            8T12  10T12 12T12 14T14 8T10  10T12  (ferr, y ~ Y0+22)
+            25    25    25    25    25    25     (largeur, y ~ Y0+38)
+            30    40    55    60    30    40     (hauteur, y ~ Y0+58)
+        """
+        if len(labels) < 3:
+            return
+
+        # Regrouper les labels par y proche (+/- 15px)
+        y_groups = {}
+        for lab in labels:
+            y_round = round(lab["y"] / 15) * 15
+            y_groups.setdefault(y_round, []).append(lab)
+
+        for y_center, group in y_groups.items():
+            if len(group) < 3:
+                continue
+            # Trier par x croissant
+            group.sort(key=lambda w: w["x"])
+
+            # Verifier que les labels sont bien des P-labels distincts
+            p_types = []
+            for lab in group:
+                m = POTEAU_LABEL_RX.match(lab["text"])
+                if m:
+                    p_types.append((m.group(1).upper(), lab))
+            if len(p_types) < 3:
+                continue
+
+            # Detecter les types uniques (eviter les doublons P2 multiples)
+            seen = set()
+            unique_cols = []
+            for tk, lab in p_types:
+                if tk not in seen:
+                    seen.add(tk)
+                    unique_cols.append((tk, lab))
+            if len(unique_cols) < 3:
+                continue
+
+            # Pour chaque colonne, chercher les valeurs en dessous
+            for tk, lab in unique_cols:
+                existing = self.global_catalogue["poteaux"].get(tk)
+                if existing and existing.get("a"):
+                    continue
+
+                spec = {}
+                cx = (lab["x"] + lab["x"]) / 2  # centre x du label
+
+                # Chercher les mots dans la colonne (x proche, y > y_label)
+                col_words = [w for w in words
+                             if abs((w["x"] + w["x"]) / 2 - cx) < 60
+                             and w["y"] > lab["y"]
+                             and w["y"] - lab["y"] < 120]
+                col_words.sort(key=lambda w: w["y"])
+
+                for w in col_words:
+                    txt = w["text"].strip()
+                    dy = w["y"] - lab["y"]
+
+                    # Ferraille (8T12, 10T12, etc.) — y ~ +20
+                    if dy < 30 and "long_bars" not in spec:
+                        bars = _dedupe_bars(
+                            [{"nb": int(g.group(1)), "phi": int(g.group(2))}
+                             for g in re.finditer(
+                                 r"(\d+)\s*(?:HA|T)\s*(\d+)", txt, re.I)])
+                        if bars:
+                            spec["aciers_longitudinaux"] = bars
+                            spec["long_bars"] = bars
+
+                    # Largeur (nombre pur 20-80) — y ~ +35..+45
+                    # Convention: a = largeur (25cm), b = hauteur (30cm)
+                    if 30 < dy < 50 and txt.isdigit() and 15 <= int(txt) <= 80:
+                        if "a" not in spec:
+                            spec["a"] = _dim_cm_to_m(int(txt))
+
+                    # Hauteur (nombre pur 20-100) — y ~ +50..+75
+                    if 50 < dy < 80 and txt.isdigit() and 15 <= int(txt) <= 100:
+                        if "b" not in spec:
+                            spec["b"] = _dim_cm_to_m(int(txt))
+
+                    # Cadres (Cad+2Ep T8, etc.) — y ~ +70..+90
+                    if 65 < dy < 95:
+                        m_c = CADRE_RX.match(txt)
+                        m_ep = CADRE_EP_RX.match(txt)
+                        if (m_c or m_ep) and "cadres" not in spec:
+                            spec["cadres"] = {
+                                "phi": int((m_c or m_ep).group(1)),
+                                "esp": None}
+                        m_e = ESP_RX.search(txt)
+                        if (m_e and spec.get("cadres")
+                                and spec["cadres"].get("esp") is None):
+                            esp_val = float(
+                                m_e.group(1).replace(",", "."))
+                            spec["cadres"]["esp"] = esp_val / 100.0
+                            spec["cadres_str"] = (
+                                f"T{spec['cadres']['phi']} "
+                                f"e={m_e.group(1).replace(',', '.')}")
+
+                # Construire la section si largeur et hauteur trouvees
+                if "a" in spec and "b" in spec:
+                    a_cm = round(spec["a"] * 100)
+                    b_cm = round(spec["b"] * 100)
+                    spec["section_str"] = f"{a_cm}x{b_cm}"
+                    self._merge_poteau(tk, spec)
+                elif "b" in spec or "a" in spec:
+                    # Partiel — on memorise quand meme
+                    self._merge_poteau(tk, spec)
 
     # ------------------------------------------------------------------
     # Details poutres (assignation au label le plus proche)

@@ -136,6 +136,13 @@ class PipelineRunner:
         dynamic_regex = self.legend_learner.build_dynamic_regex(self.store.legend)
         self.element_scanner.legend_regex = dynamic_regex
 
+        # Prefixes sans numero (ex: BN, CH dans "BN-(25X30)")
+        bare_prefixes = [
+            k for k in self.store.legend.keys()
+            if len(k) >= 2 and k.isalpha()
+        ]
+        self.element_scanner._bare_prefixes = bare_prefixes
+
         observations = self.element_scanner.scan_document(doc)
         for obs in observations:
             self.store.add_observation(obs)
