@@ -566,58 +566,79 @@ def extract_axis_grid(doc) -> dict[str, Any]:
         "cotes_niveaux": [],
     }
 
-    # Chercher les cotes d'axes dans le texte de toutes les pages
+    # Chercher les cotes d'axes dans les tableaux et texte des pages
+    seen_cotes = set()
     for page_num in range(min(len(doc), 10)):
         page = doc[page_num]
         try:
-            text = page.get_text("text")
+            tabs = page.find_tables()
         except Exception:
             continue
 
-        # Extraire toutes les sequences de nombres a 3-4 chiffres
-        # qui pourraient etre des cotes d'axes
-        all_numbers = re.findall(r"\b(\d{3,4}(?:\.\d+)?)\b", text)
-        if not all_numbers:
-            continue
+        for t in tabs.tables:
+            data = t.extract()
+            if not data:
+                continue
+            for row in data:
+                for cell in row:
+                    cell_str = str(cell or "")
+                    # Diviser la cellule par lignes
+                    lines = cell_str.split("\n")
+                    for line in lines:
+                        nums = re.findall(r"\b(\d+(?:\.\d+)?)\b", line)
+                        if len(nums) < 5:
+                            continue
+                        # Filtrer les cotes (100-600 cm, exclure marges < 100)
+                        cotes = []
+                        for n in nums:
+                            try:
+                                val = float(n)
+                                if 100 <= val <= 600:
+                                    cotes.append(val)
+                            except ValueError:
+                                pass
+                        # Si on a 5+ cotes > 100, c'est la ligne des cotes d'axes
+                        if len(cotes) >= 5 and not result["cotes_files"]:
+                            # Prendre toutes les cotes de CETTE ligne
+                            all_cotes = []
+                            for n in nums:
+                                try:
+                                    val = float(n)
+                                    if val > 0:
+                                        all_cotes.append(val)
+                                except ValueError:
+                                    pass
+                            # Detecter la fin de la sequence (valeur qui se repete)
+                            # La sequence cotes se termine quand on revoit la premiere valeur
+                            if len(all_cotes) >= 10:
+                                first = all_cotes[0]
+                                for idx in range(1, len(all_cotes)):
+                                    if all_cotes[idx] == first:
+                                        all_cotes = all_cotes[:idx]
+                                        break
+                            for v in all_cotes:
+                                if v not in seen_cotes:
+                                    seen_cotes.add(v)
+                                    result["cotes_files"].append(v)
 
-        # Filtrer pour les cotes typiques d'axes (200-800 cm)
-        axis_candidates = []
-        for n in all_numbers:
-            try:
-                val = float(n.replace(",", "."))
-                if 200 <= val <= 800:
-                    axis_candidates.append(val)
-            except ValueError:
-                pass
-
-        # Si on a au moins 3 cotes candidates, c'est probablement la trame
-        if len(axis_candidates) >= 3 and not result["cotes_files"]:
-            # Dedupliquer en gardant l'ordre
-            seen = set()
-            unique = []
-            for v in axis_candidates:
-                if v not in seen:
-                    seen.add(v)
-                    unique.append(v)
-            result["cotes_files"] = unique
-
-        # Aussi chercher des cotes de niveaux (200-500 cm, en colonne)
-        level_candidates = []
-        for n in all_numbers:
-            try:
-                val = float(n.replace(",", "."))
-                if 250 <= val <= 500:
-                    level_candidates.append(val)
-            except ValueError:
-                pass
-        if len(level_candidates) >= 2 and not result["cotes_niveaux"]:
-            seen = set()
-            unique = []
-            for v in level_candidates:
-                if v not in seen:
-                    seen.add(v)
-                    unique.append(v)
-            result["cotes_niveaux"] = unique
+        # Aussi chercher des cotes de niveaux
+        # Les niveaux ont des cotes entre 250-500 cm (hauteurs d'etage)
+        if not result["cotes_niveaux"]:
+            for row in (tabs.tables[0].extract() if tabs.tables else []):
+                for cell in row:
+                    cell_str = str(cell or "")
+                    nums = re.findall(r"\b(\d{3,4})\b", cell_str)
+                    for n in nums:
+                        try:
+                            val = float(n)
+                            if 250 <= val <= 500:
+                                if val not in seen_cotes:
+                                    seen_cotes.add(val)
+                                    result["cotes_niveaux"].append(val)
+                        except ValueError:
+                            pass
+            if len(result["cotes_niveaux"]) < 2:
+                result["cotes_niveaux"] = []
 
     # Convertir les cotes en positions cumulees
     if result["cotes_files"]:
@@ -803,25 +824,88 @@ def _calculate_beam_length(
 ) -> Optional[float]:
     """Calcule la longueur reelle d'une poutre/longrine/chainage
     en fonction de sa position dans la trame d'axes.
+
+    Algorithme :
+    1. Identifier les positions X des files d'axes sur le plan
+    2. Pour chaque occurrence, trouver la file la plus proche
+    3. Calculer la distance reelle entre les files extremites
+       en utilisant les cotes du tableau d'axes
     """
     files = axis_grid.get("files", {})
-    if not files:
+    cotes = axis_grid.get("cotes_files", [])
+    if not files or len(files) < 2:
         return None
 
-    # Trouver les positions X des occurrences
     x_positions = [o["x"] for o in occs if o["x"] > 0]
     if len(x_positions) < 2:
         return None
 
-    # La longueur est la distance entre les extremites
     x_min, x_max = min(x_positions), max(x_positions)
-    length_px = x_max - x_min
 
-    # Convertir en metres (approximatif si pas de reference)
-    # TODO: calibrer avec les cotes reelles de la trame
-    if length_px > 0:
-        return round(length_px / 1000, 2)  # Approximation
-    return None
+    # Identifier les positions X des files sur le plan
+    # Les files apparaissent en colonnes verticales sur le plan
+    # On cherche les positions X des labels A, B, C, ... dans le texte
+    # On utilise les occurrences comme reference
+
+    # Trier les files par position cumulative
+    sorted_files = sorted(files.items(), key=lambda kv: kv[1])
+
+    # Calculer les positions X des files en pixels
+    # Calibration: le premier fichier (A) a la plus petite position X
+    #              le dernier fichier (L) a la plus grande position X
+    # Les positions intermediaires sont proportionnelles
+
+    # Trouver les positions X extremes des fichiers dans les occurrences
+    # (les fichiers apparaissent comme labels sur le plan)
+    file_x_map = {}  # file_letter → x_position_pixels
+
+    # Utiliser les positions X des occurrences pour calibrer
+    # Chaque occurrence est pres d'un fichier d'axe
+    # On suppose que les fichiers sont uniformement distribues en X
+
+    # Positions cumulees des files
+    file_cumul = {name: pos for name, pos in sorted_files}
+    first_pos = sorted_files[0][1]
+    last_pos = sorted_files[-1][1]
+    total_span = last_pos - first_pos
+    if total_span <= 0:
+        return None
+
+    # Calibrer: x_min → file A, x_max → file L
+    # Les positions intermediaires sont proportionnelles
+    file_pixel_positions = {}
+    for name, cumul_pos in file_cumul.items():
+        # Position relative dans la trame (0 à 1)
+        rel = (cumul_pos - first_pos) / total_span
+        # Position en pixels
+        px = x_min + rel * (x_max - x_min)
+        file_pixel_positions[name] = px
+
+    # Pour chaque occurrence, trouver la file la plus proche
+    occ_files = set()
+    for occ in occs:
+        x = occ["x"]
+        best_name = None
+        best_dist = float("inf")
+        for name, px in file_pixel_positions.items():
+            dist = abs(x - px)
+            if dist < best_dist:
+                best_dist = dist
+                best_name = name
+        if best_name:
+            occ_files.add(best_name)
+
+    if len(occ_files) < 2:
+        return None
+
+    # Calculer la distance reelle entre les files extremites
+    # en utilisant les cotes cumulees
+    occ_file_positions = sorted(
+        [file_cumul[n] for n in occ_files]
+    )
+    length = occ_file_positions[-1] - occ_file_positions[0]
+
+    return round(length, 2) if length > 0 else None
 
 
 def _generate_ecart_report(
