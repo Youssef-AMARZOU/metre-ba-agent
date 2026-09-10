@@ -78,19 +78,31 @@ class QuantityCalculator:
         """Calcule pour une poutre/longrine/chainage."""
         a = self._get_dim(inst, "a")
         b = self._get_dim(inst, "b")
-        section = inst.dimensions.get("section")
-        if not section:
-            section_val = section.value if hasattr(section, 'value') else section
-            if section_val:
-                m = re.search(r"(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)", str(section_val))
-                if m:
-                    a_cm = float(m.group(1))
-                    b_cm = float(m.group(2))
-                    a = a_cm / 100 if a_cm > 10 else a_cm
-                    b = b_cm / 100 if b_cm > 10 else b_cm
 
-        # Longueur depuis les occurrences (distance entre axes)
-        longueur = self._get_length_from_occurrences(inst, store)
+        # Extraire a/b depuis la section si pas encore definis
+        if not a or not b:
+            section = inst.dimensions.get("section")
+            if section:
+                section_val = section.value if hasattr(section, 'value') else section
+                if section_val:
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)", str(section_val))
+                    if m:
+                        a_cm = float(m.group(1))
+                        b_cm = float(m.group(2))
+                        a = a_cm / 100 if a_cm > 10 else a_cm
+                        b = b_cm / 100 if b_cm > 10 else b_cm
+                        if not self._get_dim(inst, "a"):
+                            inst.dimensions["a"] = Evidence(
+                                value=a, source_type=SourceType.CALCULE,
+                                source_location="section_parser", page=inst.dimensions.get("section", Evidence(value="", source_type=SourceType.MANQUANT, source_location="", page=0)).page if hasattr(inst.dimensions.get("section", Evidence(value="", source_type=SourceType.MANQUANT, source_location="", page=0)), 'page') else 0,
+                            )
+                            inst.dimensions["b"] = Evidence(
+                                value=b, source_type=SourceType.CALCULE,
+                                source_location="section_parser", page=inst.dimensions.get("section", Evidence(value="", source_type=SourceType.MANQUANT, source_location="", page=0)).page if hasattr(inst.dimensions.get("section", Evidence(value="", source_type=SourceType.MANQUANT, source_location="", page=0)), 'page') else 0,
+                            )
+
+        # Longueur depuis la grille d'axes
+        longueur = self._get_length_from_grid(inst, store)
 
         if a and b and longueur:
             volume = a * b * longueur
@@ -101,8 +113,11 @@ class QuantityCalculator:
             line.unite = "m3"
             line.formule = f"{a}x{b}x{longueur}"
             line.sources["volume"] = "calculé: a*b*l"
-            line.sources["longueur"] = "trame_axes" if longueur else "manquant"
+            line.sources["longueur"] = "trame_axes"
             line.statut = "complet"
+        elif a and b:
+            line.statut = "manquant_longueur"
+            line.formule = f"{a}x{b}x?"
         else:
             line.statut = "manquant"
 
@@ -225,39 +240,39 @@ class QuantityCalculator:
                     pass
         return None
 
-    def _get_length_from_occurrences(self, inst: PhysicalInstance,
-                                      store: EvidenceStore) -> Optional[float]:
-        """Calcule la longueur depuis les positions des occurrences."""
-        if len(inst.observations) < 2:
-            return None
-
-        positions = []
-        for obs_id in inst.observations:
-            obs = store.get_obs_by_id(obs_id)
-            if obs:
-                positions.append(obs.x)
-
-        if len(positions) < 2:
-            return None
-
-        # La longueur est la distance entre les extremites
-        px_span = max(positions) - min(positions)
-        if px_span <= 0:
-            return None
-
-        # Calibrer avec la trame d'axes si disponible
+    def _get_length_from_grid(self, inst: PhysicalInstance,
+                               store: EvidenceStore) -> Optional[float]:
+        """Calcule la longueur depuis la grille d'axes."""
+        grid = None
         vue = inst.vue
         if vue in store.grids:
             grid = store.grids[vue]
-            cotes = grid.get("cotes_lettres", [])
-            if cotes:
-                total_cote_m = sum(cotes) / 100
-                # Estimer le scale depuis les axes
-                axes = grid.get("axes_lettres", [])
-                if len(axes) >= 2:
-                    # Utiliser la premiere et derniere cote pour calibrer
-                    # Approximation : px_span correspond a total_cote_m
-                    if px_span > 0:
-                        return round(total_cote_m, 2)
+        else:
+            # Fallback: chercher par page number
+            inst_page = 0
+            for obs_id in inst.observations:
+                obs = store.get_obs_by_id(obs_id)
+                if obs:
+                    inst_page = obs.page
+                    break
+            for g_name, g in store.grids.items():
+                if g.get("page") == inst_page:
+                    grid = g
+                    break
+            if not grid and store.grids:
+                grid = next(iter(store.grids.values()))
 
-        return None
+        if not grid:
+            return None
+
+        cotes = grid.get("cotes_lettres", [])
+        axes = grid.get("axes_lettres", [])
+
+        if not cotes or not axes:
+            return None
+
+        total_cote_cm = sum(cotes)
+        if total_cote_cm <= 0:
+            return None
+
+        return round(total_cote_cm / 100, 2)
