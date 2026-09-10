@@ -943,6 +943,23 @@ class PlanBAMetreApp(*_DND_BASES):
                 f"{len(impl['semelles'])} semelles positionnées "
                 f"({len(c['semelles'])} types), "
                 f"{len(c['poteaux'])} poteaux, {len(c['poutres'])} poutres"))
+
+            # Enrichir avec le pipeline zero-miss
+            if ext == ".pdf":
+                try:
+                    from core.pipeline.runner import PipelineRunner
+                    self.after(0, lambda: self._log(
+                        "Pipeline zero-miss : analyse approfondie..."))
+                    runner = PipelineRunner(verbose=False)
+                    pipeline_report = runner.run(file_path)
+                    self._merge_pipeline_results(
+                        self.plan_data, pipeline_report)
+                    self.after(0, lambda: self._log(
+                        f"Pipeline : {len(runner.store.instances)} instances, "
+                        f"{sum(1 for i in runner.store.instances if i.dimensions)} avec dims"))
+                except Exception as e:
+                    self.after(0, lambda: self._log(
+                        f"Pipeline : erreur {e}"))
             for a in self.plan_data.get("_meta", {}).get("avertissements", []):
                 self.after(0, lambda a=a: self._log(f"⚠ {a}"))
             for h in self.plan_data.get("_meta", {}).get("hypotheses", []):
@@ -1075,6 +1092,89 @@ class PlanBAMetreApp(*_DND_BASES):
         """Ouvre le dossier de sortie."""
         output = get_output_dir()
         os.startfile(str(output))
+
+    def _merge_pipeline_results(self, plan_data: dict, report: dict):
+        """Fusionne les resultats du pipeline zero-miss dans catalogue_types."""
+        catalogue = plan_data.setdefault("catalogue_types", {})
+
+        # Mapping famille pipeline -> cle catalogue
+        FAMILY_MAP = {
+            "Poteau": "poteaux", "POOTEAU": "poteaux",
+            "Poutre": "poutres", "POUTRE": "poutres",
+            "Longrine": "longrines", "LONGRINE": "longrines",
+            "Chainage": "chainages", "CHAINAGE": "chainages",
+            "Semelle": "semelles", "SEMELLE": "semelles",
+            "Voile": "voiles", "VOILE": "voiles",
+            "Mur": "murs", "MUR": "murs",
+            "Dalle": "dalles", "DALLE": "dalles",
+            "Console": "poutres", "CONSOLE": "poutres",
+            "Raidisseur": "murs", "RAIDISSEUR": "murs",
+            "Regard": "dalles", "REGARD": "dalles",
+            "Linteau": "longrines", "LINTEAU": "longrines",
+            "Bande Noyee": "murs", "BANDE NOYEE": "murs",
+        }
+
+        instances = report.get("instances", [])
+        for inst in instances:
+            repere = inst.get("repere", "")
+            family = inst.get("family_type", "")
+            dims = inst.get("dimensions", {})
+
+            cat_key = FAMILY_MAP.get(family, "")
+            if not cat_key:
+                continue
+
+            # Extraire section
+            sec_val = ""
+            a_val = None
+            b_val = None
+            h_val = None
+
+            sec = dims.get("section")
+            if isinstance(sec, dict):
+                sec_val = sec.get("value", "")
+            elif isinstance(sec, str):
+                sec_val = sec
+
+            a_raw = dims.get("a")
+            if isinstance(a_raw, dict):
+                a_val = a_raw.get("value")
+            elif isinstance(a_raw, (int, float)):
+                a_val = a_raw
+
+            b_raw = dims.get("b")
+            if isinstance(b_raw, dict):
+                b_val = b_raw.get("value")
+            elif isinstance(b_raw, (int, float)):
+                b_val = b_raw
+
+            # Creer l'entree si elle n'existe pas
+            cat = catalogue.setdefault(cat_key, {})
+
+            # Pour les poutres, la cle inclut la section
+            if cat_key == "poutres":
+                key = f"{repere}_{sec_val}" if sec_val else repere
+            else:
+                key = repere
+
+            if key not in cat or not cat[key].get("a"):
+                entry = cat.get(key, {})
+                if sec_val and not entry.get("section_str"):
+                    entry["section_str"] = sec_val
+                if a_val and not entry.get("a"):
+                    entry["a"] = a_val
+                    if cat_key == "poutres":
+                        entry["b"] = a_val
+                if b_val and not entry.get("h") and not entry.get("b"):
+                    if cat_key in ("poutres", "longrines", "chainages"):
+                        entry["h"] = b_val
+                    else:
+                        entry["b"] = b_val
+                if cat_key == "poteaux":
+                    entry.setdefault("aciers_longitudinaux", [{"nb": 0, "phi": 0}])
+                    entry.setdefault("long_bars", [{"nb": 0, "phi": 0}])
+                entry.setdefault("level", "TOIT")
+                cat[key] = entry
 
     def _show_correction_view(self, on_validate):
         """Affiche la vue de correction des elements extraits."""
