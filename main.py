@@ -137,6 +137,29 @@ def run_cli(input_path, output_dir=None, projet_nom=None):
             json.dump(plan_data, f, ensure_ascii=False, indent=2)
         raise
 
+    # --- Zero-Miss : extraction multi-pass pour BA ---
+    if input_ext == ".pdf":
+        try:
+            from core.zero_miss_extractor import run_zero_miss_extraction
+            print("  [Zero-Miss] Extraction multi-pass...")
+            zm_result = run_zero_miss_extraction(input_path)
+            zm_elements = (
+                zm_result.get("poteaux", []) +
+                zm_result.get("poutres", []) +
+                zm_result.get("longrines", []) +
+                zm_result.get("chainages", []) +
+                zm_result.get("murs", []) +
+                zm_result.get("semelles", []) +
+                zm_result.get("voiles", []) +
+                zm_result.get("autres", [])
+            )
+            print(f"  [Zero-Miss] {len(zm_elements)} elements extraits")
+            for w in zm_result.get("warnings", []):
+                print(f"  [Zero-Miss] {w}")
+            plan_data["_zero_miss"] = zm_result
+        except Exception as e:
+            print(f"  [Zero-Miss] Erreur: {e}")
+
     with open(plan_json, "w", encoding="utf-8") as f:
         json.dump(plan_data, f, ensure_ascii=False, indent=2)
     print(f"  -> {plan_json}")
