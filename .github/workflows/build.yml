@@ -26,6 +26,12 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Ensure required directories exist
+        run: |
+          if (!(Test-Path "templates")) { New-Item -ItemType Directory -Path "templates" -Force }
+          if (!(Test-Path "assets")) { New-Item -ItemType Directory -Path "assets" -Force }
+          if (!(Test-Path "reference")) { New-Item -ItemType Directory -Path "reference" -Force }
+
       - name: Build executable
         run: |
           pyinstaller --noconfirm --clean --distpath dist --workpath build --specpath . --windowed --name PlanBA_Metre_Extractor --add-data "assets;assets" --add-data "templates;templates" --add-data "reference;reference" --add-data "core;core" --collect-all customtkinter --hidden-import rapidocr_onnxruntime --hidden-import openpyxl --hidden-import PyMuPDF --hidden-import shapely --hidden-import cv2 --hidden-import numpy --hidden-import pytesseract --hidden-import chromadb --hidden-import sentence_transformers --hidden-import torch main.py
