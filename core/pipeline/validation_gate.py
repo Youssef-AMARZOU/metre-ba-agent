@@ -28,7 +28,16 @@ class ValidationGate:
 
         # Determiner l'etat
         if errors:
-            state = ValidationState.BLOQUE
+            # BLOQUE seulement si les erreurs sont critiques
+            # (dimensions manquantes, pas ferraillage seule)
+            critical_errors = [
+                e for e in errors
+                if "dimensions" in e.get("type", "") or "repere" in e.get("type", "")
+            ]
+            if critical_errors:
+                state = ValidationState.BLOQUE
+            else:
+                state = ValidationState.PROVISOIRE
         elif warnings:
             state = ValidationState.PROVISOIRE
         else:

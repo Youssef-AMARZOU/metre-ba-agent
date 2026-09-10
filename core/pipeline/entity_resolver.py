@@ -52,7 +52,19 @@ class EntityResolver:
                 instances.append(inst)
                 instance_counter += 1
 
-        return instances
+        # Regrouper par (repere, family_type) pour dedupliquer
+        seen = {}
+        unique_instances = []
+        for inst in instances:
+            key = (inst.repere, inst.family_type)
+            if key not in seen:
+                seen[key] = inst
+                unique_instances.append(inst)
+            else:
+                # Fusionner les observations
+                existing = seen[key]
+                existing.observations.extend(inst.observations)
+        return unique_instances
 
     def _cluster_observations(self, obs_list: list[Observation]) -> list[list[Observation]]:
         """Groupe les observations du meme element physique.
