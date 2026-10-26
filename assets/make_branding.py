@@ -83,8 +83,25 @@ def draw_icon(size: int = 512) -> Image.Image:
     return img
 
 
+def load_source_icon(size: int = 512) -> Image.Image | None:
+    """assets/app_icon_source.png (icone finale validee) -> RGBA carre avec
+    coins arrondis transparents (le PNG source a des coins noirs opaques)."""
+    src = ASSETS / "app_icon_source.png"
+    if not src.exists():
+        return None
+    im = Image.open(src).convert("RGBA")
+    side = min(im.size)
+    im = im.crop(((im.width - side) // 2, (im.height - side) // 2,
+                  (im.width + side) // 2, (im.height + side) // 2))
+    mask = Image.new("L", (side, side), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, side - 1, side - 1],
+                                           radius=int(side * 0.21), fill=255)
+    im.putalpha(mask)
+    return im.resize((size, size), Image.LANCZOS)
+
+
 def build_icon() -> None:
-    base = draw_icon(512)
+    base = load_source_icon(512) or draw_icon(512)
     base.save(ASSETS / "app_icon.png", "PNG")
     sizes = [16, 24, 32, 48, 64, 128, 256]
     frames = [base.resize((z, z), Image.LANCZOS) for z in sizes]
@@ -98,7 +115,7 @@ def build_splash() -> None:
     img = Image.new("RGB", (W, H), NAVY)
     d = ImageDraw.Draw(img)
     d.rectangle([0, 0, W, 6], fill=YELLOW)
-    icon = draw_icon(96).convert("RGBA")
+    icon = (load_source_icon(96) or draw_icon(96)).convert("RGBA")
     img.paste(icon, (28, 40), icon)
     d.text((140, 48), APP_NAME, font=_font(30), fill=WHITE)
     d.text((142, 92), TAGLINE, font=_font(14, bold=False), fill=CONCRETE)
