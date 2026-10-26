@@ -63,7 +63,9 @@ _DND_BASES = (ctk.CTk, TkinterDnD.DnDWrapper) if TKDND_AVAILABLE else (ctk.CTk,)
 # Constantes
 # ============================================================================
 
-APP_TITLE = "PlanBA — Métré Extracteur"
+APP_NAME = "PlanBA Pro"
+APP_TAGLINE = "Métré Béton Armé & Surfaces"
+APP_TITLE = f"{APP_NAME} — {APP_TAGLINE}"
 APP_SUBTITLE = (
     "Plans BA (PDF, DXF, scans) et plans d'architecture (images) → métré "
     "béton / acier certifié BET Maroc, surfaces par pièce et par étage, "
@@ -874,6 +876,7 @@ class PlanBAMetreApp(*_DND_BASES):
         self.geometry(APP_SIZE)
         self.minsize(800, 600)
         self.configure(fg_color=COLORS["bg_dark"])
+        self._set_window_icon()
 
         # Thème
         ctk.set_appearance_mode("dark")
@@ -920,6 +923,21 @@ class PlanBAMetreApp(*_DND_BASES):
         except Exception:
             pass  # mode script (pyi_splash absent) ou deja ferme
 
+    def _set_window_icon(self):
+        """Icone de fenetre / barre des taches (assets/app_icon.ico), en mode
+        script comme en mode PyInstaller (dossier _internal/assets)."""
+        candidates = [BASE_DIR / "assets" / "app_icon.ico"]
+        if getattr(sys, "_MEIPASS", None):
+            candidates.insert(0, Path(sys._MEIPASS) / "assets" / "app_icon.ico")
+        for ico in candidates:
+            if ico.exists():
+                try:
+                    self.iconbitmap(str(ico))
+                    self.after(250, lambda p=str(ico): self.iconbitmap(p))
+                    return
+                except Exception:
+                    continue
+
     def _build_ui(self):
         """Construit l'interface utilisateur."""
 
@@ -940,7 +958,7 @@ class PlanBAMetreApp(*_DND_BASES):
         titre_zone = ctk.CTkFrame(header, fg_color="transparent")
         titre_zone.pack(side="left", padx=20, pady=6, fill="x", expand=True)
         ctk.CTkLabel(
-            titre_zone, text="🏗️  PlanBA — Métré Extracteur",
+            titre_zone, text=f"🏗️  {APP_NAME} — {APP_TAGLINE}",
             font=ctk.CTkFont(size=21, weight="bold"),
             text_color="white").pack(anchor="w")
         ctk.CTkLabel(

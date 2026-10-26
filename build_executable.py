@@ -97,6 +97,15 @@ def build():
     if splash_path:
         args.extend(["--splash", str(splash_path)])
 
+    # Identite visuelle "PlanBA Pro" : icone de l'exe + assets embarques
+    # (icone de fenetre). Regeneree par assets/make_branding.py.
+    icon_path = ROOT / "assets" / "app_icon.ico"
+    if icon_path.exists():
+        args.extend(["--icon", str(icon_path)])
+        args.extend(["--add-data", f"{ROOT / 'assets'};assets"])
+    else:
+        print("[WARN] assets/app_icon.ico absent — python assets/make_branding.py")
+
     # Collect-all : binaires Tcl tkdnd (Drag & Drop), donnees ezdxf
     # (resources, fonts) et OCR local embarque (modeles .onnx + runtime).
     try:
