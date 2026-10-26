@@ -494,6 +494,13 @@ class KPIStrip(ctk.CTkFrame):
         return round(beton, 2), None, n
 
     def update_values(self, plan_data: dict, surfaces: dict = None):
+        try:
+            from core.vision_bridge import plan_data_is_placeholder
+            if plan_data and plan_data_is_placeholder(plan_data):
+                # Geometrie par defaut du moteur historique : jamais affichee
+                plan_data = {"_meta": plan_data.get("_meta", {})}
+        except Exception:
+            pass
         beton, acier, n_ouvrages = self._beton_acier(plan_data or {})
         meta = (plan_data or {}).get("_meta", {})
         n_alert = len(meta.get("avertissements", []) or [])
@@ -511,8 +518,10 @@ class KPIStrip(ctk.CTkFrame):
         if n_rooms:
             pieces.append(f"{n_rooms} pièces")
         if n_ouvrages:
-            pieces.append(f"{n_ouvrages} ouvrages")
-        self.values["pieces"].configure(text=" / ".join(pieces) if pieces else "—")
+            pieces.append(f"{n_ouvrages} ouvr.")
+        self.values["pieces"].configure(
+            text=" / ".join(pieces) if pieces else "—",
+            font=ctk.CTkFont(size=16 if len(pieces) > 1 else 20, weight="bold"))
         self.values["alertes"].configure(
             text=str(n_alert), text_color=COLORS["danger"] if n_alert else COLORS["success"])
 
