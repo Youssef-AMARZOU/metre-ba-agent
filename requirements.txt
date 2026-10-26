@@ -28,6 +28,12 @@ shapely>=2.0              # calculs geometriques (segments, intersections)
 # Clustering spatial
 scikit-learn>=1.4         # DBSCAN pour clustering par niveau
 
+# Computer Vision hybride (extractors/vision_extractor.py) — 100% freemium
+scipy>=1.10               # cKDTree : graphe spatial repere <-> cote <-> acier
+requests>=2.31            # client HTTP VLM OpenAI-compatible (Ollama / Groq free)
+# VLM optionnel : Ollama local (`ollama pull qwen2.5-vl:7b`) ou GROQ_API_KEY
+# Variables : PLANBA_VLM_BACKEND=auto|ollama|groq|off, OLLAMA_VLM_MODEL
+
 # Conversion DWG (optionnel — necessite ODA File Converter installe)
 # dwg2dxf                 # convertisseur DWG->DXF (CLI)
 

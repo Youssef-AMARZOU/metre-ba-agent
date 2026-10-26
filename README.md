@@ -283,6 +283,20 @@ Cette section explique le fonctionnement interne en termes simples — utile pou
 5. **Détails poteaux et poutres.** Les caractéristiques sont cherchées autour de chaque repère : section `(25x30)`, barres `8T12` ou `4T12+4T10`, cadres `2CAD T6 e=15`.
 6. **Plans scannés.** Si une page contient moins de 15 mots de texte mais une image (cas d'un scan), un moteur de lecture optique local (RapidOCR, 100 % hors-ligne) lit l'image et ses résultats suivent exactement le même circuit que le texte normal. Les plans vectoriels ne déclenchent jamais cette étape, donc jamais de ralentissement inutile.
 7. **Calculs et livrables.** Les données vérifiées alimentent les formules Excel, le calpinage et le rapport.
+8. **Computer Vision hybride (polices AutoCAD SHX explosées / scans).** Beaucoup de PDF AutoCAD semblent vectoriels mais contiennent 0 texte sélectionnable (lettres converties en milliers de petits segments). Dès qu'une page compte moins de 15 mots, ou plus de 1 500 vecteurs avec un ratio vecteurs/mots > 25, le moteur `extractors/vision_extractor.py` prend le relais : rendu 300 DPI, détection morphologique des tableaux (OpenCV), contours des poteaux/semelles, OCR local par tuiles (PaddleOCR → RapidOCR → EasyOCR → Tesseract), graphe spatial `cKDTree` reliant *contour ↔ repère ↔ cote ↔ ferraillage*, bulles d'axes (`HoughCircles`) pour les files, et correction anti-hallucination des décimales (`25x400` → `0.25×0.40 m` si le contour l'impose). Un VLM optionnel (Ollama local `qwen2.5-vl:7b` ou Groq Free Tier) ne reçoit que les **crops** des tableaux, en JSON strict, `temperature=0`. Le VLM et l'OCR ne calculent **jamais** un volume ni un poids.
+9. **Moteur déterministe BET Maroc.** Tout élément lu passe 4 portes (`core/moroccan_bet_engine.py`) : unités mm/cm → m, déduplication par `(niveau, repère)` avec union des files d'axes, décodage des armatures (`6HA14 L=4.20`, `Cad HA8 e=15`), contrôle croisé quantité coffrage = nomenclature + ratio kg/m³ dans la plage RPS 2000 v2011. Formules codées en dur : béton de propreté avec débord 10 cm, tronc de pyramide des semelles à glacis, **portée strictement entre nus** (`L_axe − a_g/2 − a_d/2`), retombée si dalle pleine, ancrages `2×15Φ`, recouvrements `50Φ` par barre de 12 m, cadres `2(b−2c)+2(h−2c)+2·max(10Φ, 8 cm)`. Les diamètres hors catalogue NM 01.4.097 (`HA18`, `HA15`) sont bloqués avec proposition du diamètre voisin.
+10. **Classeur certifié `metre_certifie_BET.xlsx`** (5 feuilles, `core/populate_modele_bet.py`) : avant-métré (`=ROUND(F*G*H*I,3)`), nomenclature acier ventilée HA6…HA32, bordereau DQE lié par `SUMIF` (HT / TVA 20 % / TTC en MAD), tableau de bord des ratios RPS 2011 avec journal des anomalies et vignettes OpenCV de preuve, optimisation de coupe des barres de 12 m (First-Fit Decreasing). Les overlays d'audit colorés (vert validé / orange à vérifier / rouge anomalie) sont écrits dans `output/audit_overlays/page_{n}.png`.
+
+11. **Métré des surfaces (plans d'architecture).** Une image ou un PDF de *distribution* (pièces, cotes, sans semelles/poteaux) n'est plus une erreur : `extractors/surface_extractor.py` lit les libellés de pièces (FR/EN), les cotes (`3.50`, `350`, `16'-0"`, `18'×10'`), calibre l'échelle px/m par les chaînes de cotes (avec indice de confiance), segmente les pièces (murs épais, portes scellées, mobilier rempli) et produit `metre_surfaces.xlsx` : surface par pièce (`=ROUND(L*l,2)`), sous-totaux par étage (`SUMIF`), total, périmètres, puis lots second œuvre (sol, plinthes, enduit/peinture = périmètre × HSP, plafond) avec HT/TVA/TTC. Règles : cote explicite `L x l` prioritaire sur la segmentation ; zones ouvertes partagées comptées une seule fois ; **[ALERTE ECHELLE]** si les cotes hors-tout se contredisent — l'ingénieur saisit alors la *largeur hors-tout réelle* (UI ou `--largeur-hors-tout 18.90`) ; une pièce sans cote ni échelle est marquée `NON TROUVÉE`, jamais estimée.
+
+```bash
+python main.py --cli --input plan_archi.jpg --largeur-hors-tout 18.90   # métré des surfaces calibré
+python main.py --cli --input plan.pdf --vision auto    # défaut : pages SHX / scannées seulement
+python main.py --cli --input plan.pdf --vision force   # toutes les pages en Computer Vision
+python main.py --cli --input plan.pdf --vision off     # chemin vectoriel pur
+# VLM local gratuit (optionnel) :  ollama pull qwen2.5-vl:7b   puis PLANBA_VLM_BACKEND=auto
+# VLM Groq Free Tier (optionnel) : set GROQ_API_KEY=gsk_...   et PLANBA_VLM_BACKEND=groq
+```
 
 **Conventions reconnues** (françaises et marocaines) : semelles `S`, `SF` (filantes) ; poteaux `P` et `Q` ; étiquettes couplées `(S1,Q1)` ; poutres `N`, `BN`, `PN`, `PC`, `LG`, `CH` (et variantes `BIS`) ; armatures `HA` ou `T` (`6HA14`, `8T12`), espacements `e=15`, `Esp=15`, `e=(10x9`.
 
@@ -360,8 +374,18 @@ metre-ba-agent/
 │   ├── ocr_engine.py         # Secours OCR paresseux (RapidOCR/ONNX, pages scannées)
 │   ├── ingestion.py          # Ingestion DXF / images / PDF raster
 │   ├── calculator.py         # Mathématiques béton armé pures
-│   ├── schemas.py            # Modèles de données
+│   ├── schemas.py            # Modèles de données (contrat token Pydantic)
+│   ├── bet_contracts.py      # Contrats unifiés DrawingElement / ExtractedPlanRecord + pont legacy
+│   ├── moroccan_bet_engine.py # Moteur déterministe BET Maroc + 4 portes (Gatekeeper)
+│   ├── populate_modele_bet.py # Classeur certifié 5 feuilles (formules dynamiques)
+│   ├── vision_bridge.py      # Routage hybride vision <-> CLI / UI
 │   └── paths.py              # Chemins compatibles .exe (jamais de dossier temporaire)
+│   ├── surface_metre_excel.py # Classeur surfaces (pièces / étages / second œuvre)
+├── extractors/
+│   ├── surface_extractor.py  # Métré des surfaces : OCR pièces, échelle, segmentation
+│   ├── vision_extractor.py   # Computer Vision : SHX/scan, tables, contours, cKDTree, overlay
+│   ├── ocr_router.py         # OCR local : PaddleOCR > RapidOCR > EasyOCR > Tesseract
+│   └── vlm_router.py         # VLM freemium OpenAI-compatible : Ollama local / Groq free
 ├── build_metre.py            # Classeur métré (formules actives)
 ├── optimisation_chantiers.py  # Calpinage barres 12 m (+ alias generators/excel_optimisation.py)
 ├── rapport_metre.py          # Rapport PDF (ReportLab)

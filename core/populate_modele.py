@@ -33,12 +33,28 @@ Contrat d'entree (format plat) :
 Allocation 100% dynamique : les blocs sont reconstruits selon le nombre
 reel d'elements (aucun chevauchement, sous-totaux et liens recalcules).
 Les styles sont recopies depuis le gabarit (aucune charte en dur ici).
+
+Second moteur (classeur certifie BET Maroc, formules dynamiques, sans
+gabarit) : `PlanBAExcelPopulator` / `ExtractedPlanRecord` /
+`injecter_records_certifies` -- voir `core/populate_modele_bet.py`.
 """
 from copy import copy
 from pathlib import Path
 
 import openpyxl
 from openpyxl.utils import get_column_letter
+
+from core.bet_contracts import DrawingElement, ExtractedPlanRecord  # noqa: F401
+from core.populate_modele_bet import (  # noqa: F401
+    PlanBAExcelPopulator, SHEET_NAMES, optimize_12m_stock_bars)
+
+
+def injecter_records_certifies(records, output_path: str,
+                               projet_nom: str = "Projet BTP"):
+    """Classeur certifie BET Maroc (5 feuilles, formules dynamiques) a
+    partir d'`ExtractedPlanRecord` (issus de la vision ou du legacy)."""
+    populator = PlanBAExcelPopulator(project_name=projet_nom)
+    return populator.process_and_export(records, output_path)
 
 DIAMETRES_DEFAUT = [6, 8, 10, 12, 14, 16, 20, 25, 32]
 POIDS_ML = [0.222, 0.395, 0.617, 0.888, 1.208, 1.578, 2.466, 3.853, 6.313]

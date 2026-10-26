@@ -1,0 +1,783 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+extractors/surface_extractor.py -- Metre des surfaces sur plans d'architecture.
+
+Pour un plan de distribution (pieces, cotes), ce module calcule, 100 % en
+local (OpenCV + OCR local) :
+  - la surface de chaque piece (m2) : cote explicite 'L x l' si presente,
+    sinon segmentation geometrique de la piece calibree par l'echelle ;
+  - le perimetre de chaque piece (plinthes, enduits, peinture) ;
+  - les totaux par etage et le total general ;
+  - une calibration d'echelle (px / m) deduite des chaines de cotes, avec
+    un indice de confiance et des alertes si les cotes sont incoherentes.
+
+Unites acceptees : metres (3.50), centimetres (350), millimetres (3500),
+pieds/pouces (16'-0", 13-6", 12.3', 18'x10"). Sortie TOUJOURS en metres.
+
+Regle : aucune surface n'est inventee. Sans echelle fiable ni cote
+explicite, la piece est listee avec surface vide et une alerte.
+"""
+from __future__ import annotations
+
+import logging
+import math
+import re
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
+
+FT_TO_M = 0.3048
+IN_TO_M = 0.0254
+
+# Lexique FR / EN / conventions Maroc (les mots inconnus en majuscules sont
+# aussi acceptes s'ils sont situes a l'interieur du batiment)
+ROOM_LEXICON = (
+    "chambre", "ch", "salon", "sejour", "séjour", "cuisine", "sdb",
+    "salle", "bain", "douche", "wc", "toilette", "hall", "entree", "entrée",
+    "couloir", "degagement", "dégagement", "bureau", "terrasse", "balcon",
+    "garage", "buanderie", "patio", "cellier", "placard", "dressing",
+    "rangement", "cage", "escalier", "local", "loggia", "veranda", "veranda",
+    "bibliotheque", "atelier", "cave", "jardin", "cour", "porche",
+    "bedroom", "kitchen", "living", "dining", "bath", "bathroom", "closet",
+    "foyer", "laundry", "office", "room", "master", "walk-in", "pantry",
+    "garage", "porch", "storage", "study", "den", "nook", "mudroom",
+    "powder", "utility", "lobby", "corridor",
+)
+EXCLUDED_WORDS = (
+    "scale", "echelle", "échelle", "plan", "floorplan", "residential",
+    "niveau", "etage", "étage", "rdc", "coupe", "facade", "façade", "nord",
+    "north", "detail", "détail", "legende", "légende", "date", "dessin",
+    "projet", "client", "architecte", "ingenieur", "ingénieur", "titre",
+    "notes", "note", "sheet", "drawn", "checked",
+)
+LEVEL_RX = re.compile(
+    r"\b(RDC|REZ[-\s]?DE[-\s]?CHAUSS[ÉE]E|SOUS[-\s]?SOL|MEZZANINE|"
+    r"R\s*\+\s*\d+|[ÉE]TAGE\s*\d*|NIVEAU\s*\w+|\d+(?:ER|EME|ÈME)\s*[ÉE]TAGE|"
+    r"(?:GROUND|FIRST|SECOND|THIRD|\d+(?:ST|ND|RD|TH))\s+FLOOR|"
+    r"LEVEL\s*\d+|PLAN\s+[A-Z0-9]{1,3})\b", re.IGNORECASE)
+
+# --- Longueurs ------------------------------------------------------------
+_NUM = r"(\d+(?:[.,]\d+)?)"
+RX_FT_IN = re.compile(
+    rf"^{_NUM}\s*['′’]\s*[-–]?\s*(?:(\d{{1,2}}(?:[.,]\d+)?)\s*[\"″”]?)?$")
+RX_FT_DASH = re.compile(r"^(\d+)\s*[-–]\s*(\d{1,2})\s*[\"″”]?$")
+RX_IN_ONLY = re.compile(rf"^{_NUM}\s*[\"″”]$")
+RX_METRIC = re.compile(rf"^{_NUM}\s*(m|cm|mm)?\.?$", re.IGNORECASE)
+RX_DIM_PAIR = re.compile(r"^(.+?)\s*[x×X*]\s*(.+?)$")
+RX_HAS_UNIT = re.compile(r"['′’\"″”]|\bm\b|\bcm\b|\bmm\b|\d-\d", re.IGNORECASE)
+
+
+def parse_length(text: str, room_context: bool = False) -> Optional[float]:
+    """Texte de cote -> metres. `room_context` : dans 'L x l', un nombre
+    suivi de \" seul (OCR ' -> \") et >= 3 est lu en pieds."""
+    if text is None:
+        return None
+    t = str(text).strip().replace("\u2032", "'").replace("\u2033", '"')
+    t = t.replace("’", "'").replace("”", '"').strip("()[] ")
+    t = t.lstrip(".")
+    if not t:
+        return None
+    m = RX_FT_IN.match(t)
+    if m:
+        ft = float(m.group(1).replace(",", "."))
+        inch = float(m.group(2).replace(",", ".")) if m.group(2) else 0.0
+        return round(ft * FT_TO_M + inch * IN_TO_M, 3)
+    m = RX_FT_DASH.match(t)
+    if m:
+        return round(int(m.group(1)) * FT_TO_M + int(m.group(2)) * IN_TO_M, 3)
+    m = RX_IN_ONLY.match(t)
+    if m:
+        v = float(m.group(1).replace(",", "."))
+        if room_context and v >= 3:
+            return round(v * FT_TO_M, 3)
+        return round(v * IN_TO_M, 3)
+    m = RX_METRIC.match(t)
+    if m:
+        v = float(m.group(1).replace(",", "."))
+        unit = (m.group(2) or "").lower()
+        if unit == "mm":
+            return round(v / 1000.0, 3)
+        if unit == "cm":
+            return round(v / 100.0, 3)
+        if unit == "m":
+            return round(v, 3)
+        # Sans unite : heuristique BTP (plans marocains cotes en cm)
+        if v >= 1000:
+            return round(v / 1000.0, 3)
+        if v >= 30:
+            return round(v / 100.0, 3)
+        return round(v, 3)
+    return None
+
+
+def parse_room_dims(text: str) -> Optional[Tuple[float, float]]:
+    """'18\\'x10\"', '4.20x3.50', '420 x 350' -> (L, l) en metres."""
+    if not text:
+        return None
+    t = str(text).strip()
+    m = RX_DIM_PAIR.match(t)
+    if not m:
+        return None
+    a = parse_length(m.group(1), room_context=True)
+    b = parse_length(m.group(2), room_context=True)
+    if a is None or b is None or a <= 0 or b <= 0:
+        return None
+    if a > 40 or b > 40 or a < 0.5 or b < 0.5:
+        return None
+    return (a, b)
+
+
+def is_dimension_token(text: str) -> bool:
+    t = str(text or "").strip()
+    if not t or RX_DIM_PAIR.match(t):
+        return False
+    if parse_length(t) is None:
+        return False
+    # Avec unite, ou entier 3-4 chiffres (cm/mm), ou decimal 'x.xx' (m)
+    return (bool(RX_HAS_UNIT.search(t)) or bool(re.match(r"^\d{3,4}$", t))
+            or bool(re.match(r"^\d{1,2}[.,]\d{1,2}$", t)))
+
+
+# --- Structures -------------------------------------------------------------
+
+@dataclass
+class RoomSurface:
+    label: str
+    level: str = "RDC"
+    width_m: Optional[float] = None
+    length_m: Optional[float] = None
+    area_explicit_m2: Optional[float] = None
+    area_segmented_m2: Optional[float] = None
+    perimeter_m: Optional[float] = None
+    source: str = ""              # 'cote_explicite' | 'segmentation' | 'aucune'
+    confidence: float = 0.0
+    bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
+    region_bbox: Optional[Tuple[int, int, int, int]] = None
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def area_m2(self) -> Optional[float]:
+        if self.area_explicit_m2:
+            return self.area_explicit_m2
+        return self.area_segmented_m2
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d["area_m2"] = self.area_m2
+        return d
+
+
+@dataclass
+class SurfaceReport:
+    level: str = "RDC"
+    page_num: int = 1
+    rooms: List[RoomSurface] = field(default_factory=list)
+    scale_px_per_m: Optional[float] = None
+    scale_confidence: float = 0.0
+    scale_estimates: List[Dict[str, Any]] = field(default_factory=list)
+    building_bbox: Optional[Tuple[int, int, int, int]] = None
+    warnings: List[str] = field(default_factory=list)
+    n_ocr_tokens: int = 0
+    ocr_engine: Optional[str] = None
+    overlay_path: Optional[str] = None
+    image_shape: Tuple[int, int] = (0, 0)
+
+    @property
+    def total_area_m2(self) -> float:
+        return round(sum(r.area_m2 or 0.0 for r in self.rooms), 2)
+
+    @property
+    def total_perimeter_m(self) -> float:
+        return round(sum(r.perimeter_m or 0.0 for r in self.rooms), 2)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "level": self.level, "page_num": self.page_num,
+            "rooms": [r.to_dict() for r in self.rooms],
+            "scale_px_per_m": self.scale_px_per_m,
+            "scale_confidence": self.scale_confidence,
+            "scale_estimates": self.scale_estimates,
+            "building_bbox": self.building_bbox,
+            "warnings": list(self.warnings),
+            "total_area_m2": self.total_area_m2,
+            "total_perimeter_m": self.total_perimeter_m,
+            "n_ocr_tokens": self.n_ocr_tokens, "ocr_engine": self.ocr_engine,
+            "overlay_path": self.overlay_path,
+        }
+
+
+# --- Extracteur -------------------------------------------------------------
+
+class PlanSurfaceExtractor:
+    """Plan d'architecture (image / page PDF) -> SurfaceReport."""
+
+    def __init__(self, ocr_router: Optional[Any] = None, dpi: int = 200,
+                 max_side_px: int = 3000):
+        self._ocr = ocr_router
+        self.dpi = dpi
+        self.max_side_px = max_side_px
+
+    @property
+    def ocr(self):
+        if self._ocr is None:
+            from extractors.ocr_router import LocalOCRRouter
+            self._ocr = LocalOCRRouter()
+        return self._ocr
+
+    # ------------------------------------------------------------------
+    # Entrees
+    # ------------------------------------------------------------------
+    def extract_image(self, image_path: str, level: Optional[str] = None,
+                      page_num: int = 1, overlay_dir: Optional[str] = None,
+                      known_width_m: Optional[float] = None,
+                      known_height_m: Optional[float] = None) -> SurfaceReport:
+        import cv2
+        import numpy as np
+        data = np.fromfile(str(image_path), dtype=np.uint8)  # chemins accentues
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
+        if img is None:
+            rep = SurfaceReport(page_num=page_num)
+            rep.warnings.append(f"Image illisible : {image_path}")
+            return rep
+        return self.extract_from_image(img, level=level, page_num=page_num,
+                                       overlay_dir=overlay_dir,
+                                       known_width_m=known_width_m,
+                                       known_height_m=known_height_m)
+
+    def extract_pdf(self, pdf_path: str, overlay_dir: Optional[str] = None,
+                    progress_callback=None) -> List[SurfaceReport]:
+        import fitz
+        import numpy as np
+        import cv2
+        reports: List[SurfaceReport] = []
+        with fitz.open(str(pdf_path)) as doc:
+            for idx in range(len(doc)):
+                page = doc[idx]
+                zoom = self.dpi / 72.0
+                if max(page.rect.width, page.rect.height) * zoom > self.max_side_px:
+                    zoom = self.max_side_px / max(page.rect.width, page.rect.height)
+                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False,
+                                      colorspace=fitz.csRGB)
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width, pix.n)[:, :, :3]
+                img = cv2.cvtColor(np.ascontiguousarray(img), cv2.COLOR_RGB2BGR)
+                # Mots vectoriels natifs -> tokens OCR (plus fiables que l'OCR)
+                native = []
+                for x0, y0, x1, y1, w, *_ in page.get_text("words"):
+                    native.append({"text": w, "conf": 1.0,
+                                   "bbox": (int(x0 * zoom), int(y0 * zoom),
+                                            int((x1 - x0) * zoom), int((y1 - y0) * zoom))})
+                if progress_callback:
+                    progress_callback(idx + 1, len(doc), "surfaces")
+                rep = self.extract_from_image(
+                    img, page_num=idx + 1, overlay_dir=overlay_dir,
+                    ocr_items=native if len(native) >= 8 else None)
+                if rep.rooms:
+                    reports.append(rep)
+        return reports
+
+    # ------------------------------------------------------------------
+    # Pipeline image
+    # ------------------------------------------------------------------
+    def extract_from_image(self, img_bgr, level: Optional[str] = None,
+                           page_num: int = 1, overlay_dir: Optional[str] = None,
+                           ocr_items: Optional[List[Dict[str, Any]]] = None,
+                           known_width_m: Optional[float] = None,
+                           known_height_m: Optional[float] = None
+                           ) -> SurfaceReport:
+        """`known_width_m` / `known_height_m` : largeur / hauteur hors-tout
+        reelle du batiment saisie par l'ingenieur -> calibration manuelle
+        prioritaire sur les cotes lues (plans incoherents ou sans cotes)."""
+        import cv2
+        H, W = img_bgr.shape[:2]
+        if max(H, W) > self.max_side_px:
+            f = self.max_side_px / max(H, W)
+            img_bgr = cv2.resize(img_bgr, (int(W * f), int(H * f)),
+                                 interpolation=cv2.INTER_AREA)
+            H, W = img_bgr.shape[:2]
+        rep = SurfaceReport(page_num=page_num, image_shape=(H, W))
+
+        if ocr_items is None:
+            ocr_items = self.ocr.recognize(img_bgr) if self.ocr.available else []
+            rep.ocr_engine = self.ocr.engine_name
+        else:
+            rep.ocr_engine = "pdf_text"
+        rep.n_ocr_tokens = len(ocr_items)
+        if not ocr_items:
+            rep.warnings.append("Aucun texte lu (OCR indisponible ou image vide).")
+            return rep
+
+        rep.level = level or self.detect_level(ocr_items) or "RDC"
+        wall_mask = self.wall_mask(img_bgr)
+        rep.building_bbox = self.building_bbox(wall_mask)
+
+        labels = self.room_labels(ocr_items, rep.building_bbox, (H, W))
+        dim_tokens = [it for it in ocr_items if is_dimension_token(it["text"])]
+        pair_tokens = [(it, parse_room_dims(it["text"])) for it in ocr_items]
+        pair_tokens = [(it, d) for it, d in pair_tokens if d]
+
+        scale, conf, estimates, warns = self.calibrate_scale(
+            dim_tokens, rep.building_bbox, (H, W))
+        if rep.building_bbox and (known_width_m or known_height_m):
+            bx, by, bw, bh = rep.building_bbox
+            manual = []
+            if known_width_m:
+                manual.append(bw / float(known_width_m))
+            if known_height_m:
+                manual.append(bh / float(known_height_m))
+            scale = round(sum(manual) / len(manual), 3)
+            conf = 0.95
+            estimates.insert(0, {"method": "manuel_hors_tout", "px_per_m": scale,
+                                 "a": f"{known_width_m or ''} x {known_height_m or ''} m",
+                                 "b": f"{bw}x{bh}px"})
+            warns = [w for w in warns if not w.startswith("[ALERTE ECHELLE]")]
+            warns.append("Echelle calibrée manuellement (largeur/hauteur hors-tout saisie).")
+        rep.scale_px_per_m, rep.scale_confidence = scale, conf
+        rep.scale_estimates = estimates
+        rep.warnings.extend(warns)
+
+        regions = self.segment_rooms(wall_mask, rep.building_bbox,
+                                     scale_px_per_m=scale)
+        rep.rooms = self.build_rooms(labels, pair_tokens, regions, wall_mask,
+                                     scale, conf, rep.level, (H, W))
+        if not rep.rooms:
+            rep.warnings.append("Aucune piece identifiee (libelles absents).")
+        if overlay_dir:
+            rep.overlay_path = self.render_overlay(
+                img_bgr, rep, Path(overlay_dir) / f"surfaces_page_{page_num}.png")
+        return rep
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def detect_level(ocr_items: Sequence[Dict[str, Any]]) -> Optional[str]:
+        for it in ocr_items:
+            m = LEVEL_RX.search(str(it["text"]))
+            if m:
+                return m.group(1).upper().replace("  ", " ")
+        return None
+
+    @staticmethod
+    def wall_mask(img_bgr, min_wall_px: Optional[int] = None):
+        """Murs = traits epais ; textes et cotes (fins) sont elimines par
+        ouverture morphologique. Le noyau est ADAPTATIF : on part du plus
+        grand et on descend jusqu'a ce qu'une composante murale couvre au
+        moins 25 % de l'image (plans basse resolution : murs de 2-3 px)."""
+        import cv2
+        H, W = img_bgr.shape[:2]
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        if min_wall_px:
+            ks = [min_wall_px]
+        else:
+            k0 = max(3, int(round(max(H, W) * 0.004)))
+            ks = list(range(k0, 1, -1))
+        walls = dark
+        for k in ks:
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+            walls = cv2.morphologyEx(dark, cv2.MORPH_OPEN, kernel)
+            n, _, stats, _ = cv2.connectedComponentsWithStats(walls, 8)
+            if n > 1 and max(max(stats[i, cv2.CC_STAT_WIDTH] / W,
+                                 stats[i, cv2.CC_STAT_HEIGHT] / H)
+                             for i in range(1, n)) >= 0.25:
+                break
+        return walls
+
+    @staticmethod
+    def building_bbox(wall_mask) -> Optional[Tuple[int, int, int, int]]:
+        """Union des grandes composantes murales (>= 20 % de l'image)."""
+        import cv2
+        import numpy as np
+        H, W = wall_mask.shape
+        n, lbl, stats, _ = cv2.connectedComponentsWithStats(wall_mask, 8)
+        if n <= 1:
+            return None
+        # Grandes composantes EPAISSES (murs) : les lignes de cotes, longues
+        # mais fines (area/(w+h) < 2.5 px), sont exclues de l'enveloppe.
+        big = [i for i in range(1, n)
+               if (stats[i, cv2.CC_STAT_WIDTH] >= 0.20 * W
+                   or stats[i, cv2.CC_STAT_HEIGHT] >= 0.20 * H)
+               and stats[i, cv2.CC_STAT_AREA] / max(
+                   1, stats[i, cv2.CC_STAT_WIDTH] + stats[i, cv2.CC_STAT_HEIGHT]) >= 2.5]
+        if not big:
+            big = [max(range(1, n), key=lambda i: stats[i, cv2.CC_STAT_WIDTH]
+                       * stats[i, cv2.CC_STAT_HEIGHT])]
+        x0 = min(int(stats[i, cv2.CC_STAT_LEFT]) for i in big)
+        y0 = min(int(stats[i, cv2.CC_STAT_TOP]) for i in big)
+        x1 = max(int(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH]) for i in big)
+        y1 = max(int(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]) for i in big)
+        return (x0, y0, x1 - x0, y1 - y0)
+
+    @staticmethod
+    def _fill_holes(mask):
+        """Remplit les trous interieurs (mobilier, ilots) d'une region."""
+        import cv2
+        import numpy as np
+        h, w = mask.shape
+        flood = mask.copy()
+        ff_mask = np.zeros((h + 2, w + 2), np.uint8)
+        cv2.floodFill(flood, ff_mask, (0, 0), 255)
+        holes = cv2.bitwise_not(flood)
+        return cv2.bitwise_or(mask, holes)
+
+    @staticmethod
+    def segment_rooms(wall_mask, bbox: Optional[Tuple[int, int, int, int]],
+                      seal_px: Optional[int] = None,
+                      scale_px_per_m: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Espaces libres fermes. Les portes sont scellees par FERMETURE
+        morphologique (dilatation puis erosion) : les ouvertures < k px sont
+        bouchees sans epaissir les murs ni fragmenter les pieces."""
+        import cv2
+        import numpy as np
+        H, W = wall_mask.shape
+        if bbox is None:
+            return []
+        bx, by, bw, bh = bbox
+        if seal_px:
+            k = seal_px
+        elif scale_px_per_m:
+            # 0.85 m : bouche une porte standard (0.80-0.90 m) sans fermer un
+            # degagement reglementaire (>= 1.00 m)
+            k = int(round(0.85 * scale_px_per_m))
+            k = max(7, min(k, int(0.12 * max(bw, bh))))
+        else:
+            k = max(7, int(round(max(bw, bh) * 0.02)))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        sealed = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, kernel)
+        free = cv2.bitwise_not(sealed)
+        # Hors batiment -> ignore
+        outside = np.ones_like(free)
+        outside[by:by + bh, bx:bx + bw] = 0
+        free[outside == 1] = 0
+        n, lbl, stats, cents = cv2.connectedComponentsWithStats(free, 4)
+        regions: List[Dict[str, Any]] = []
+        min_area = 0.002 * bw * bh
+        max_area = 0.95 * bw * bh
+        for i in range(1, n):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < min_area or area > max_area:
+                continue
+            x, y, w, h = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
+                          int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]))
+            # Region collee au bord de l'enveloppe sur 3 cotes = exterieur
+            touches = sum((x <= bx + 2, y <= by + 2, x + w >= bx + bw - 2,
+                           y + h >= by + bh - 2))
+            if touches >= 3:
+                continue
+            comp = (lbl == i).astype(np.uint8) * 255
+            # Mobilier / ilots interieurs : la piece est la region REMPLIE
+            filled = PlanSurfaceExtractor._fill_holes(comp)
+            area_px = int(np.count_nonzero(filled))
+            cnts, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cnts:
+                continue
+            main = max(cnts, key=cv2.contourArea)
+            perim_px = float(cv2.arcLength(main, True))
+            rx, ry, rw, rh = cv2.boundingRect(main)
+            regions.append({"id": i, "mask": filled, "area_px": area_px,
+                            "perimeter_px": perim_px,
+                            "bbox": (int(rx), int(ry), int(rw), int(rh)),
+                            "center": (float(cents[i][0]), float(cents[i][1]))})
+        # Une region incluse dans le remplissage d'une autre (interieur d'un
+        # lit, ilot de cuisine) n'est pas une piece : on la retire.
+        keep: List[Dict[str, Any]] = []
+        for rg in sorted(regions, key=lambda r: -r["area_px"]):
+            cx, cy = int(rg["center"][0]), int(rg["center"][1])
+            enclosed = any(k2["mask"][cy, cx] > 0 and k2["area_px"] > rg["area_px"] * 1.5
+                           for k2 in keep)
+            if not enclosed:
+                keep.append(rg)
+        return keep
+
+    @staticmethod
+    def room_labels(ocr_items: Sequence[Dict[str, Any]],
+                    bbox: Optional[Tuple[int, int, int, int]],
+                    shape: Tuple[int, int]) -> List[Dict[str, Any]]:
+        """Libelles de pieces (mots alphabetiques, fusion des lignes empilees)."""
+        H, W = shape
+        cands = []
+        for it in ocr_items:
+            t = str(it["text"]).strip()
+            core = re.sub(r"[\d\s\-_.]+$", "", t)
+            if len(core) < 2 or not re.search(r"[A-Za-zÀ-ÿ]{2,}", core):
+                continue
+            if re.search(r"\d\s*[x×X*]\s*\d", t) or is_dimension_token(t):
+                continue
+            low = core.lower()
+            if any(low.startswith(w) or w in low for w in EXCLUDED_WORDS):
+                continue
+            x, y, w, h = it["bbox"]
+            cx, cy = x + w / 2.0, y + h / 2.0
+            if bbox is not None:
+                bx, by, bw, bh = bbox
+                margin = 0.02 * max(bw, bh)
+                if not (bx - margin <= cx <= bx + bw + margin
+                        and by - margin <= cy <= by + bh + margin):
+                    continue
+            known = any(w_ in low for w_ in ROOM_LEXICON)
+            if not known and not re.match(r"^[A-ZÀ-Ý][A-ZÀ-Ý\-]{2,}\d?$", t):
+                continue
+            cands.append({"text": t, "bbox": it["bbox"], "conf": float(it.get("conf", 0.8)),
+                          "pt": (cx, cy), "known": known})
+        # Fusion des libelles empiles ('MASTER' / 'BATH')
+        cands.sort(key=lambda c: (c["pt"][1], c["pt"][0]))
+        merged: List[Dict[str, Any]] = []
+        for c in cands:
+            x, y, w, h = c["bbox"]
+            for m in merged:
+                mx, my, mw, mh = m["bbox"]
+                if (abs((mx + mw / 2) - (x + w / 2)) < max(mw, w) * 0.6
+                        and 0 <= y - (my + mh) < 1.2 * max(h, mh)):
+                    m["text"] = f"{m['text']} {c['text']}"
+                    nx0, ny0 = min(mx, x), min(my, y)
+                    nx1, ny1 = max(mx + mw, x + w), max(my + mh, y + h)
+                    m["bbox"] = (nx0, ny0, nx1 - nx0, ny1 - ny0)
+                    m["pt"] = (nx0 + (nx1 - nx0) / 2.0, ny0 + (ny1 - ny0) / 2.0)
+                    m["conf"] = min(m["conf"], c["conf"])
+                    m["known"] = m["known"] or c["known"]
+                    break
+            else:
+                merged.append(dict(c))
+        return merged
+
+    # ------------------------------------------------------------------
+    def calibrate_scale(self, dim_tokens: Sequence[Dict[str, Any]],
+                        bbox: Optional[Tuple[int, int, int, int]],
+                        shape: Tuple[int, int]
+                        ) -> Tuple[Optional[float], float, List[Dict[str, Any]], List[str]]:
+        """px/m par (1) chaines de cotes consecutives, (2) cote hors-tout vs
+        enveloppe des murs. Mediane + dispersion -> confiance."""
+        import numpy as np
+        H, W = shape
+        toks = []
+        for it in dim_tokens:
+            L = parse_length(it["text"])
+            if not L or L <= 0.2 or L > 200:
+                continue
+            x, y, w, h = it["bbox"]
+            toks.append({"L": L, "cx": x + w / 2.0, "cy": y + h / 2.0,
+                         "horiz": w >= h, "text": it["text"]})
+        estimates: List[Dict[str, Any]] = []
+        tol = max(8.0, 0.012 * max(H, W))
+
+        def chains(items, key_group, key_sort):
+            groups: List[List[dict]] = []
+            for t in sorted(items, key=lambda t: t[key_group]):
+                for g in groups:
+                    if abs(g[-1][key_group] - t[key_group]) <= tol:
+                        g.append(t)
+                        break
+                else:
+                    groups.append([t])
+            for g in groups:
+                g.sort(key=lambda t: t[key_sort])
+                for a, b in zip(g, g[1:]):
+                    gap = b[key_sort] - a[key_sort]
+                    expect = (a["L"] + b["L"]) / 2.0
+                    if gap > 5 and expect > 0:
+                        estimates.append({"method": "chaine", "px_per_m": gap / expect,
+                                          "a": a["text"], "b": b["text"]})
+
+        chains([t for t in toks if t["horiz"]], "cy", "cx")
+        chains([t for t in toks if not t["horiz"]], "cx", "cy")
+
+        warns: List[str] = []
+        if bbox is not None and toks:
+            bx, by, bw, bh = bbox
+            # Cotes hors-tout : situees HORS de l'enveloppe (au-dessus / en
+            # dessous pour les horizontales, a gauche / droite pour les
+            # verticales) et de grande valeur.
+            horiz = [t for t in toks if t["horiz"]
+                     and (t["cy"] < by or t["cy"] > by + bh)]
+            vert = [t for t in toks if not t["horiz"]
+                    and (t["cx"] < bx or t["cx"] > bx + bw)]
+            for group, dim_px, tag in ((horiz, bw, "x"), (vert, bh, "y")):
+                if not group:
+                    continue
+                ordered = sorted(group, key=lambda t: -t["L"])
+                big = ordered[0]
+                estimates.append({"method": f"hors_tout_{tag}",
+                                  "px_per_m": dim_px / big["L"],
+                                  "a": big["text"], "b": f"{dim_px}px"})
+                # Cotes centrees sur l'enveloppe = cotes hors-tout. Deux
+                # valeurs tres differentes pour la meme emprise : plan
+                # incoherent -> l'ingenieur doit saisir la largeur reelle.
+                axis = "cx" if tag == "x" else "cy"
+                origin = bx if tag == "x" else by
+                centered = [t for t in group
+                            if abs(t[axis] - (origin + dim_px / 2.0)) < 0.15 * dim_px
+                            and t["L"] >= 0.25 * big["L"]]
+                if len(centered) >= 2:
+                    lo = min(centered, key=lambda t: t["L"])
+                    hi = max(centered, key=lambda t: t["L"])
+                    if hi["L"] / max(lo["L"], 1e-6) > 1.8:
+                        warns.append(
+                            f"[ALERTE ECHELLE] cotes hors-tout contradictoires en "
+                            f"{tag} : {hi['text']} vs {lo['text']} pour la même "
+                            f"emprise. Saisir la largeur hors-tout réelle (m).")
+
+        vals = np.array([e["px_per_m"] for e in estimates if 0.5 < e["px_per_m"] < 5000])
+        if len(vals) == 0:
+            warns.append("Echelle non calibrable : aucune chaine de cotes lisible.")
+            return None, 0.0, estimates, warns
+        med = float(np.median(vals))
+        spread = float(np.median(np.abs(vals - med)) / med) if med else 1.0
+        conf = max(0.0, min(1.0, 1.0 - spread * 2.0))
+        if len(vals) < 2:
+            conf = min(conf, 0.5)
+        if spread > 0.25:
+            warns.append(
+                f"[ALERTE ECHELLE] cotes incoherentes entre elles (dispersion "
+                f"{spread*100:.0f} %) : surfaces segmentees a verifier.")
+        for e in estimates:
+            e["px_per_m"] = round(e["px_per_m"], 2)
+        return round(med, 3), round(conf, 2), estimates, warns
+
+    # ------------------------------------------------------------------
+    def build_rooms(self, labels, pair_tokens, regions, wall_mask, scale, conf,
+                    level, shape) -> List[RoomSurface]:
+        import numpy as np
+        H, W = shape
+        radius = 0.22 * math.hypot(H, W)
+        rooms: List[RoomSurface] = []
+        # Affectation gloutonne des cotes explicites (distance croissante)
+        pairs: List[Tuple[float, int, int]] = []
+        for li, lb in enumerate(labels):
+            for pi, (it, _) in enumerate(pair_tokens):
+                x, y, w, h = it["bbox"]
+                d = math.hypot(lb["pt"][0] - (x + w / 2), lb["pt"][1] - (y + h / 2))
+                if d <= radius:
+                    pairs.append((d, li, pi))
+        pairs.sort()
+        used_l, used_p, assign = set(), set(), {}
+        for d, li, pi in pairs:
+            if li in used_l or pi in used_p:
+                continue
+            assign[li] = pi
+            used_l.add(li)
+            used_p.add(pi)
+
+        # Region geometrique contenant chaque libelle (la plus grande qui le
+        # contient : un libelle place dans un lit remonte a la chambre)
+        region_of: Dict[int, Optional[Dict[str, Any]]] = {}
+        for li, lb in enumerate(labels):
+            x, y, w, h = (int(v) for v in lb["bbox"])
+            x0, y0 = max(0, x - 4), max(0, y - 4)
+            x1, y1 = min(W, x + w + 4), min(H, y + h + 4)
+            best, best_cov = None, 0
+            for rg in regions:
+                cov = int(np.count_nonzero(rg["mask"][y0:y1, x0:x1]))
+                # recouvrement majoritaire, puis la plus grande region
+                if cov > best_cov or (cov == best_cov and best is not None
+                                      and cov > 0 and rg["area_px"] > best["area_px"]):
+                    best, best_cov = rg, cov
+            region_of[li] = best if best_cov > 0 else None
+        labels_in_region: Dict[int, List[int]] = {}
+        for li, rg in region_of.items():
+            if rg is not None:
+                labels_in_region.setdefault(rg["id"], []).append(li)
+
+        for li, lb in enumerate(labels):
+            room = RoomSurface(label=lb["text"].upper(), level=level,
+                               bbox=tuple(int(v) for v in lb["bbox"]),
+                               confidence=lb["conf"])
+            region = region_of[li]
+            shared = region is not None and len(labels_in_region[region["id"]]) > 1
+            if region is not None:
+                room.region_bbox = tuple(int(v) for v in region["bbox"])
+                if scale and not shared:
+                    room.area_segmented_m2 = round(region["area_px"] / (scale ** 2), 2)
+                    room.perimeter_m = round(region["perimeter_px"] / scale, 2)
+            if li in assign:
+                it, (a, b) = pair_tokens[assign[li]]
+                room.length_m, room.width_m = max(a, b), min(a, b)
+                room.area_explicit_m2 = round(a * b, 2)
+                if room.perimeter_m is None:
+                    room.perimeter_m = round(2 * (a + b), 2)
+                room.source = "cote_explicite"
+                room.confidence = round(min(lb["conf"], float(it.get("conf", 0.8))), 2)
+                if room.area_segmented_m2:
+                    ratio = room.area_segmented_m2 / max(room.area_explicit_m2, 1e-6)
+                    if not (0.6 <= ratio <= 1.6):
+                        room.warnings.append(
+                            f"Ecart cote explicite ({room.area_explicit_m2} m²) vs "
+                            f"segmentation ({room.area_segmented_m2} m²) : a verifier.")
+            elif room.area_segmented_m2:
+                room.source = "segmentation"
+                room.confidence = round(min(lb["conf"], conf), 2)
+                if conf < 0.5:
+                    room.warnings.append("Echelle peu fiable : surface indicative.")
+                if room.area_segmented_m2 < 3.0:
+                    room.confidence = round(room.confidence * 0.5, 2)
+                    room.warnings.append(
+                        "Région suspecte (< 3 m²) : mobilier ou cloison non fermée ? "
+                        "À vérifier sur l'overlay.")
+            elif shared:
+                others = [labels[j]["text"].upper()
+                          for j in labels_in_region[region["id"]] if j != li]
+                room.source = "zone_ouverte"
+                room.confidence = round(min(lb["conf"], conf), 2)
+                room.warnings.append(
+                    "Zone ouverte partagée avec " + ", ".join(others)
+                    + " : surface comptée dans la ligne ZONE OUVERTE.")
+            else:
+                room.source = "aucune"
+                room.confidence = 0.0
+                room.warnings.append(
+                    "Surface NON TROUVEE : ni cote 'L x l' ni echelle exploitable.")
+            rooms.append(room)
+
+        # Zones ouvertes : une ligne par region partagee, surface segmentee
+        # moins les cotes explicites deja comptees (jamais de double comptage)
+        if scale:
+            for rid, lis in labels_in_region.items():
+                if len(lis) < 2:
+                    continue
+                region = next(r for r in regions if r["id"] == rid)
+                seg = region["area_px"] / (scale ** 2)
+                explicit = sum(rooms[j].area_explicit_m2 or 0.0 for j in lis)
+                residual = round(seg - explicit, 2)
+                names = " + ".join(labels[j]["text"].upper() for j in lis)
+                zone = RoomSurface(
+                    label=f"ZONE OUVERTE ({names})", level=level,
+                    area_segmented_m2=max(0.0, residual),
+                    perimeter_m=round(region["perimeter_px"] / scale, 2),
+                    source="segmentation", confidence=round(conf, 2),
+                    bbox=tuple(int(v) for v in region["bbox"]),
+                    region_bbox=tuple(int(v) for v in region["bbox"]))
+                zone.warnings.append(
+                    f"Région segmentée {seg:.2f} m² − cotes explicites "
+                    f"{explicit:.2f} m² = {max(0.0, residual):.2f} m².")
+                if residual < 0:
+                    zone.warnings.append(
+                        "[ALERTE] cotes explicites > surface segmentée : vérifier l'échelle.")
+                rooms.append(zone)
+        return rooms
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def render_overlay(img_bgr, rep: SurfaceReport, out_path: Path) -> str:
+        import cv2
+        canvas = img_bgr.copy()
+        if rep.building_bbox:
+            x, y, w, h = rep.building_bbox
+            cv2.rectangle(canvas, (x, y), (x + w, y + h), (200, 120, 0), 2)
+        for r in rep.rooms:
+            if r.region_bbox:
+                x, y, w, h = r.region_bbox
+                color = ((0, 170, 0) if r.source == "cote_explicite"
+                         else (0, 140, 255) if r.source == "segmentation" else (0, 0, 255))
+                cv2.rectangle(canvas, (x, y), (x + w, y + h), color, 2)
+            x, y, w, h = r.bbox
+            txt = f"{r.label}: {r.area_m2 if r.area_m2 is not None else '?'} m2"
+            cv2.putText(canvas, txt, (x, max(12, y - 6)), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55, (30, 30, 200), 2, cv2.LINE_AA)
+        footer = (f"{rep.level} | total {rep.total_area_m2} m2 | echelle "
+                  f"{rep.scale_px_per_m or '?'} px/m (conf {rep.scale_confidence})")
+        cv2.putText(canvas, footer, (10, canvas.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2, cv2.LINE_AA)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(out_path), canvas)
+        return str(out_path)

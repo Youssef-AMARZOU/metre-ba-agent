@@ -61,7 +61,11 @@ def launch_gui():
     launch_app()
 
 
-def run_cli(input_path, output_dir=None, projet_nom=None):
+from core.vision_bridge import run_vision_hybride  # noqa: E402
+
+
+def run_cli(input_path, output_dir=None, projet_nom=None, vision_mode="auto",
+            largeur_hors_tout_m=None):
     """Pipeline complet CLI : extraction + metrique + optimisation + rapport."""
     from extract_plan import LocalPlanExtractor
     from build_metre import MetreGenerator
@@ -110,6 +114,30 @@ def run_cli(input_path, output_dir=None, projet_nom=None):
     if projet_nom:
         plan_data.setdefault("projet", {})["nom"] = projet_nom
 
+    # --- Couche Computer Vision hybride (pages scannees / SHX explosees) ---
+    print(f"\n[1b/5] Computer Vision hybride (mode {vision_mode})...")
+    vision = run_vision_hybride(input_path, output_dir, projet_nom,
+                                mode=vision_mode)
+    if vision["pages_vision"]:
+        plan_data.setdefault("_meta", {})["vision"] = {
+            "pages": vision["pages_vision"],
+            "overlays": vision["overlays"],
+            "xlsx_certifie": vision["xlsx"],
+            "n_records": len(vision["records"]),
+        }
+        cat0 = plan_data.get("catalogue_types", {})
+        vectoriel_vide = not any(len(cat0.get(k, {})) for k in
+                                 ("semelles", "poteaux", "poutres"))
+        if vectoriel_vide and vision["plan_data_fallback"]:
+            print("  Extraction vectorielle vide -> bascule sur les "
+                  "éléments Computer Vision")
+            meta_old = plan_data.get("_meta", {})
+            plan_data = vision["plan_data_fallback"]
+            plan_data["_meta"]["vision"] = meta_old.get("vision", {})
+            plan_data["_meta"]["avertissements"].append(
+                "Éléments issus de la Computer Vision (OCR/VLM) : vérifier "
+                "les vignettes d'audit avant utilisation chantier.")
+
     c = plan_data["catalogue_types"]
     impl = plan_data["implantations"]
     n_sem_types = len(c["semelles"])
@@ -128,13 +156,39 @@ def run_cli(input_path, output_dir=None, projet_nom=None):
     for h in meta.get("hypotheses", []):
         print(f"  â€¢ Hypothese : {h}")
 
+    # --- Metre des surfaces (plan d'architecture : pieces / etages) ---
+    print(f"\n[1c/5] Métré des surfaces (pièces / étages)...")
+    from core.vision_bridge import run_surface_metre
+    surfaces = run_surface_metre(input_path, output_dir, projet_nom,
+                                 known_width_m=largeur_hors_tout_m)
+    if surfaces["xlsx"]:
+        plan_data.setdefault("_meta", {})["surfaces"] = {
+            "xlsx": surfaces["xlsx"], "total_m2": surfaces["total_m2"],
+            "summary": surfaces["summary"], "overlays": surfaces["overlays"],
+            "rooms": [r.to_dict() for rep in surfaces["reports"] for r in rep.rooms],
+        }
+
     # --- Garde-fou partage CLI/UI (source de verite unique) ---
     from core.local_extractor import verifier_livrables_ou_lever
+    from core.vision_bridge import plan_data_is_placeholder
     try:
+        if surfaces["xlsx"] and plan_data_is_placeholder(plan_data):
+            raise ExtractionError("Aucun ouvrage BA réel (géométrie par défaut).")
         verifier_livrables_ou_lever(plan_data)
     except Exception as e:
         with open(plan_json, "w", encoding="utf-8") as f:
             json.dump(plan_data, f, ensure_ascii=False, indent=2)
+        if surfaces["xlsx"]:
+            # Plan d'architecture sans ouvrage BA : le metre des surfaces
+            # EST le livrable (pas une erreur).
+            print("\n  Aucun ouvrage BA (semelle/poteau/poutre) : plan "
+                  "d'architecture -> livrable = métré des surfaces.")
+            print("=" * 60)
+            print(f"  metre_surfaces.xlsx         : {surfaces['xlsx']}")
+            for ov in surfaces["overlays"]:
+                print(f"  overlay surfaces            : {ov}")
+            return {"plan_data": plan_json, "metre_surfaces": surfaces["xlsx"],
+                    "surfaces_overlays": surfaces["overlays"], "mode": "surfaces"}
         raise
 
     # --- Pipeline modular : extraction zero-miss ---
@@ -198,6 +252,10 @@ def run_cli(input_path, output_dir=None, projet_nom=None):
     print(f"  optimisation_chantiers.xlsx : {optim_xlsx}")
     print(f"  rapport_metre.pdf           : {rapport_pdf}")
     print(f"  note_calculs_chantier.pdf   : {note_pdf}")
+    if vision["xlsx"]:
+        print(f"  metre_certifie_BET.xlsx     : {vision['xlsx']}")
+        for ov in vision["overlays"]:
+            print(f"  overlay d'audit             : {ov}")
 
     return {
         "plan_data": plan_json,
@@ -205,6 +263,9 @@ def run_cli(input_path, output_dir=None, projet_nom=None):
         "optimisation": optim_xlsx,
         "rapport": rapport_pdf,
         "note": note_pdf,
+        "metre_certifie_bet": vision["xlsx"],
+        "metre_surfaces": surfaces["xlsx"],
+        "audit_overlays": vision["overlays"],
     }
 
 
@@ -219,13 +280,22 @@ def main():
                     help="Repertoire de sortie (mode CLI)")
     ap.add_argument("--projet-nom", default=None,
                     help="Nom du projet (optionnel)")
+    ap.add_argument("--vision", choices=("auto", "force", "off"),
+                    default="auto",
+                    help="Computer Vision : auto (pages scannees / SHX "
+                         "uniquement), force (toutes les pages), off")
+    ap.add_argument("--largeur-hors-tout", type=float, default=None,
+                    help="Largeur hors-tout reelle du batiment (m) pour "
+                         "calibrer l'echelle du metre des surfaces")
     args = ap.parse_args()
 
     if args.cli:
         if not args.input:
             print("ERREUR : --input requis en mode CLI")
             sys.exit(1)
-        run_cli(args.input, args.out, args.projet_nom)
+        run_cli(args.input, args.out, args.projet_nom,
+                vision_mode=args.vision,
+                largeur_hors_tout_m=args.largeur_hors_tout)
     else:
         launch_gui()
 

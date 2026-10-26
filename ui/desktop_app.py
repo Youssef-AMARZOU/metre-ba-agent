@@ -65,10 +65,11 @@ _DND_BASES = (ctk.CTk, TkinterDnD.DnDWrapper) if TKDND_AVAILABLE else (ctk.CTk,)
 
 APP_TITLE = "PlanBA — Métré Extracteur"
 APP_SUBTITLE = (
-    "Plan PDF de fondations en béton armé → métré Excel, rapport PDF "
-    "d'audit et optimisation de découpe — 100 % en local, sans API. "
-    "Chaque quantité est sourcée (texte natif, vecteurs, vision) et "
-    "chaque écart est documenté : aucune valeur inventée."
+    "Plans BA (PDF, DXF, scans) et plans d'architecture (images) → métré "
+    "béton / acier certifié BET Maroc, surfaces par pièce et par étage, "
+    "DQE, optimisation de coupe — 100 % local et gratuit (OpenCV + OCR, "
+    "VLM Ollama/Groq optionnel). Chaque quantité est sourcée, chaque écart "
+    "est documenté : aucune valeur inventée."
 )
 
 
@@ -92,7 +93,7 @@ def clean_dropped_path(raw) -> str:
         s = s.strip('"').strip("'").strip()
     s = s.strip()
     return os.path.normpath(s) if s else ""
-APP_SIZE = "900x720"
+APP_SIZE = "1040x780"
 SUPPORTED_FORMATS = [
     ("Fichiers BA", "*.pdf *.dxf *.dwg *.png *.jpg *.jpeg *.tiff *.tif *.bmp *.webp"),
     ("PDF", "*.pdf"),
@@ -104,16 +105,22 @@ SUPPORTED_FORMATS = [
 BASE_DIR = Path(__file__).parent.parent
 CONFIG_DIR = BASE_DIR / "config"
 
-# Couleurs thème
+# Couleurs theme "genie civil" : bleu structure, jaune securite chantier,
+# gris beton, vert validation, orange acier (a verifier), rouge anomalie.
 COLORS = {
-    "primary": "#2F5496",
-    "success": "#28A745",
-    "warning": "#FFC107",
-    "danger": "#DC3545",
-    "bg_dark": "#1a1a2e",
-    "bg_card": "#16213e",
-    "text_light": "#E8E8E8",
-    "text_muted": "#A0A0A0",
+    "primary": "#1F5FA8",        # bleu structure / plans
+    "primary_dark": "#164A85",
+    "accent": "#F5B700",         # jaune securite chantier
+    "steel": "#E8772E",          # orange acier / a verifier
+    "success": "#2EA043",
+    "warning": "#F5B700",
+    "danger": "#D93025",
+    "bg_dark": "#0F1B2D",        # bleu nuit (fond)
+    "bg_card": "#172A44",        # carte
+    "bg_card_alt": "#1E3555",
+    "concrete": "#8A9BB0",       # gris beton (textes secondaires)
+    "text_light": "#EEF2F7",
+    "text_muted": "#9FB0C4",
 }
 
 
@@ -248,89 +255,154 @@ class DropZone(ctk.CTkFrame):
 # ============================================================================
 
 class OptionsPanel(ctk.CTkFrame):
-    """Panneau d'options : nom du projet, clé API, template."""
+    """Panneau d'options ingenieur : projet, mode d'analyse, vision
+    freemium (Ollama local / Groq free), calibration des surfaces."""
+
+    MODES = ["Auto (structure BA + surfaces)", "Structure BA uniquement",
+             "Surfaces architecture uniquement"]
+    VLM_CHOICES = ["Désactivé (OCR local seul)", "Ollama local (qwen2.5-vl)",
+                   "Groq Free Tier (clé requise)"]
 
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
+        f12 = ctk.CTkFont(size=12)
+        f11b = ctk.CTkFont(size=11, weight="bold")
 
-        # Nom du projet
-        self.label_nom = ctk.CTkLabel(
-            self, text="Nom du projet (optionnel) :",
-            font=ctk.CTkFont(size=12))
-        self.label_nom.pack(anchor="w", padx=10)
+        grid = ctk.CTkFrame(self, fg_color="transparent")
+        grid.pack(fill="x", padx=10)
+        grid.grid_columnconfigure((0, 1), weight=1, uniform="opt")
 
+        # --- Colonne 1 : projet + mode ---
+        ctk.CTkLabel(grid, text="NOM DU PROJET", font=f11b,
+                     text_color=COLORS["text_muted"]).grid(
+            row=0, column=0, sticky="w", padx=(0, 8))
         self.entry_nom = ctk.CTkEntry(
-            self, placeholder_text="Ex: Construction Immeuble R+4",
-            width=400, height=32,
-            font=ctk.CTkFont(size=12))
-        self.entry_nom.pack(anchor="w", padx=10, pady=(2, 8))
+            grid, placeholder_text="Ex : Villa R+1 — Lot Gros Œuvre",
+            height=32, font=f12)
+        self.entry_nom.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(2, 8))
 
-        # Clé API Vision
-        self.label_api = ctk.CTkLabel(
-            self, text="Clé API Vision (OpenAI / Anthropic) :",
-            font=ctk.CTkFont(size=12))
-        self.label_api.pack(anchor="w", padx=10)
+        ctk.CTkLabel(grid, text="MODE D'ANALYSE", font=f11b,
+                     text_color=COLORS["text_muted"]).grid(
+            row=2, column=0, sticky="w", padx=(0, 8))
+        self.mode_menu = ctk.CTkOptionMenu(
+            grid, values=self.MODES, height=32, font=f12,
+            fg_color=COLORS["bg_card"], button_color=COLORS["primary"],
+            button_hover_color=COLORS["primary_dark"])
+        self.mode_menu.set(self.MODES[0])
+        self.mode_menu.grid(row=3, column=0, sticky="ew", padx=(0, 8), pady=(2, 8))
 
-        api_frame = ctk.CTkFrame(self, fg_color="transparent")
-        api_frame.pack(fill="x", padx=10, pady=(2, 4))
+        # --- Colonne 2 : vision freemium ---
+        ctk.CTkLabel(grid, text="VISION IA (100 % GRATUIT, OPTIONNEL)", font=f11b,
+                     text_color=COLORS["text_muted"]).grid(
+            row=0, column=1, sticky="w")
+        self.vlm_menu = ctk.CTkOptionMenu(
+            grid, values=self.VLM_CHOICES, height=32, font=f12,
+            fg_color=COLORS["bg_card"], button_color=COLORS["primary"],
+            button_hover_color=COLORS["primary_dark"],
+            command=self._on_vlm_change)
+        self.vlm_menu.grid(row=1, column=1, sticky="ew", pady=(2, 8))
 
+        key_frame = ctk.CTkFrame(grid, fg_color="transparent")
+        key_frame.grid(row=3, column=1, sticky="ew", pady=(2, 8))
+        key_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(grid, text="CLÉ GROQ (gsk_…) — jamais envoyée ailleurs",
+                     font=f11b, text_color=COLORS["text_muted"]).grid(
+            row=2, column=1, sticky="w")
         self.entry_api_key = ctk.CTkEntry(
-            api_frame, placeholder_text="sk-... ou sk-ant-...",
-            width=320, height=32, show="*",
-            font=ctk.CTkFont(size=12))
-        self.entry_api_key.pack(side="left")
-
+            key_frame, placeholder_text="gsk_…", height=32, show="*", font=f12)
+        self.entry_api_key.grid(row=0, column=0, sticky="ew")
         self.btn_toggle = ctk.CTkButton(
-            api_frame, text="👁", width=36, height=32,
-            font=ctk.CTkFont(size=12),
+            key_frame, text="👁", width=36, height=32, font=f12,
             fg_color="#555555", hover_color="#444444",
             command=self._toggle_visibility)
-        self.btn_toggle.pack(side="left", padx=(4, 0))
+        self.btn_toggle.grid(row=0, column=1, padx=(4, 0))
         self._api_visible = False
 
-        # Charger depuis .env si disponible
+        # --- Ligne 3 : calibration surfaces ---
+        ctk.CTkLabel(grid, text="LARGEUR HORS-TOUT (m) — calibration échelle",
+                     font=f11b, text_color=COLORS["text_muted"]).grid(
+            row=4, column=0, sticky="w", padx=(0, 8))
+        self.entry_largeur = ctk.CTkEntry(
+            grid, placeholder_text="Ex : 18.90 (vide = lecture des cotes)",
+            height=32, font=f12)
+        self.entry_largeur.grid(row=5, column=0, sticky="ew", padx=(0, 8), pady=(2, 4))
+
+        ctk.CTkLabel(grid, text="HAUTEUR SOUS PLAFOND (m) — enduits",
+                     font=f11b, text_color=COLORS["text_muted"]).grid(
+            row=4, column=1, sticky="w")
+        self.entry_hsp = ctk.CTkEntry(grid, height=32, font=f12)
+        self.entry_hsp.insert(0, "2.80")
+        self.entry_hsp.grid(row=5, column=1, sticky="ew", pady=(2, 4))
+
         self._load_from_env()
+        self._on_vlm_change(self.vlm_menu.get())
 
     def _toggle_visibility(self):
         self._api_visible = not self._api_visible
-        self.entry_api_key.configure(
-            show="" if self._api_visible else "*")
-        self.btn_toggle.configure(
-            text="🙈" if self._api_visible else "👁")
+        self.entry_api_key.configure(show="" if self._api_visible else "*")
+        self.btn_toggle.configure(text="🙈" if self._api_visible else "👁")
+
+    def _on_vlm_change(self, choice):
+        groq = choice.startswith("Groq")
+        state = "normal" if groq else "disabled"
+        self.entry_api_key.configure(state=state)
+        self.btn_toggle.configure(state=state)
 
     def _load_from_env(self):
-        """Charge la clé API depuis .env ou les variables d'environnement."""
-        # 1. Variable d'environnement
-        api_key = os.environ.get("OPENAI_API_KEY") or \
-                  os.environ.get("ANTHROPIC_API_KEY") or ""
+        """Cle Groq depuis l'environnement ou .env (jamais d'API payante)."""
+        api_key = os.environ.get("GROQ_API_KEY", "")
+        if not api_key:
+            env_path = BASE_DIR / ".env"
+            if env_path.exists():
+                try:
+                    with open(env_path, encoding="utf-8") as f:
+                        for line in f:
+                            if line.strip().startswith("GROQ_API_KEY="):
+                                api_key = line.split("=", 1)[1].strip().strip('"')
+                                break
+                except Exception:
+                    pass
         if api_key:
             self.entry_api_key.insert(0, api_key)
-            return
+            self.vlm_menu.set(self.VLM_CHOICES[2])
 
-        # 2. Fichier .env
-        env_path = BASE_DIR / ".env"
-        if env_path.exists():
-            try:
-                with open(env_path, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("OPENAI_API_KEY="):
-                            val = line.split("=", 1)[1].strip().strip('"')
-                            self.entry_api_key.insert(0, val)
-                            return
-                        elif line.startswith("ANTHROPIC_API_KEY="):
-                            val = line.split("=", 1)[1].strip().strip('"')
-                            self.entry_api_key.insert(0, val)
-                            return
-            except Exception:
-                pass
+    @staticmethod
+    def _float_or_none(entry):
+        try:
+            v = float(entry.get().strip().replace(",", "."))
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
 
     def get_nom(self) -> str:
         return self.entry_nom.get().strip() or None
 
     def get_api_key(self) -> str:
         return self.entry_api_key.get().strip() or None
+
+    def get_mode(self) -> str:
+        """'auto' | 'ba' | 'surfaces'"""
+        idx = self.MODES.index(self.mode_menu.get()) if self.mode_menu.get() in self.MODES else 0
+        return ("auto", "ba", "surfaces")[idx]
+
+    def get_vlm_backend(self) -> str:
+        """'off' | 'ollama' | 'groq'"""
+        c = self.vlm_menu.get()
+        return "groq" if c.startswith("Groq") else "ollama" if c.startswith("Ollama") else "off"
+
+    def get_largeur_hors_tout(self):
+        return self._float_or_none(self.entry_largeur)
+
+    def get_hsp(self) -> float:
+        return self._float_or_none(self.entry_hsp) or 2.80
+
+    def apply_vision_env(self):
+        """Propage les choix freemium aux routeurs (variables d'environnement)."""
+        os.environ["PLANBA_VLM_BACKEND"] = self.get_vlm_backend()
+        key = self.get_api_key()
+        if self.get_vlm_backend() == "groq" and key:
+            os.environ["GROQ_API_KEY"] = key
 
 
 # ============================================================================
@@ -363,6 +435,163 @@ class ProgressPanel(ctk.CTkFrame):
     def reset(self):
         self.label_step.configure(text="")
         self.progressbar.set(0)
+
+
+# ============================================================================
+# Widget personnalisé : Bandeau d'indicateurs (KPI) ingenieur
+# ============================================================================
+
+class KPIStrip(ctk.CTkFrame):
+    """Cartes : beton (m3), acier (kg), surfaces (m2), anomalies, pieces."""
+
+    CARDS = [
+        ("beton", "BÉTON", "m³", "primary"),
+        ("acier", "ACIER HA", "kg", "steel"),
+        ("surfaces", "SURFACES", "m²", "accent"),
+        ("pieces", "PIÈCES / OUVRAGES", "", "concrete"),
+        ("alertes", "ALERTES", "", "danger"),
+    ]
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        self.configure(fg_color="transparent")
+        self.values: dict = {}
+        for i, (key, title, unit, color) in enumerate(self.CARDS):
+            card = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=10,
+                                border_width=2, border_color=COLORS[color])
+            card.grid(row=0, column=i, sticky="nsew", padx=4, pady=2)
+            self.grid_columnconfigure(i, weight=1, uniform="kpi")
+            ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=10, weight="bold"),
+                         text_color=COLORS["text_muted"]).pack(pady=(8, 0))
+            val = ctk.CTkLabel(card, text="—", font=ctk.CTkFont(size=20, weight="bold"),
+                               text_color=COLORS[color])
+            val.pack()
+            ctk.CTkLabel(card, text=unit or " ", font=ctk.CTkFont(size=10),
+                         text_color=COLORS["text_muted"]).pack(pady=(0, 8))
+            self.values[key] = val
+
+    @staticmethod
+    def _beton_acier(plan_data: dict):
+        """Totaux indicatifs (le classeur Excel reste la reference)."""
+        try:
+            from build_metre import adapter_plan_vers_injecteur
+            d = adapter_plan_vers_injecteur(plan_data)
+        except Exception:
+            return None, None, 0
+        beton = 0.0
+        n = 0
+        for s in d.get("semelles", []):
+            beton += (s.get("a") or 0) * (s.get("b") or 0) * (s.get("h") or 0)
+            n += 1
+        for p in d.get("poteaux", []):
+            beton += (p.get("a") or 0) * (p.get("b") or 0) * (p.get("hauteur") or 0)
+            n += 1
+        for b in d.get("poutres", []) + d.get("longrines", []) + d.get("chainages", []):
+            beton += (b.get("b") or 0) * (b.get("h") or 0) * (b.get("portee") or 0)
+            n += 1
+        return round(beton, 2), None, n
+
+    def update_values(self, plan_data: dict, surfaces: dict = None):
+        beton, acier, n_ouvrages = self._beton_acier(plan_data or {})
+        meta = (plan_data or {}).get("_meta", {})
+        n_alert = len(meta.get("avertissements", []) or [])
+        n_rooms = 0
+        total_m2 = None
+        if surfaces and surfaces.get("xlsx"):
+            total_m2 = surfaces.get("total_m2")
+            n_rooms = surfaces.get("summary", {}).get("n_rooms", 0)
+            n_alert += len(surfaces.get("warnings", []) or [])
+        self.values["beton"].configure(text=f"{beton:,.2f}" if beton else "—")
+        self.values["acier"].configure(text="voir Excel" if beton else "—")
+        self.values["surfaces"].configure(
+            text=f"{total_m2:,.2f}" if total_m2 is not None else "—")
+        pieces = []
+        if n_rooms:
+            pieces.append(f"{n_rooms} pièces")
+        if n_ouvrages:
+            pieces.append(f"{n_ouvrages} ouvrages")
+        self.values["pieces"].configure(text=" / ".join(pieces) if pieces else "—")
+        self.values["alertes"].configure(
+            text=str(n_alert), text_color=COLORS["danger"] if n_alert else COLORS["success"])
+
+
+# ============================================================================
+# Widget personnalisé : Surfaces par piece / etage
+# ============================================================================
+
+class SurfacesPanel(ctk.CTkFrame):
+    """Tableau des surfaces (etage, piece, source, L x l, m2, perimetre,
+    confiance) avec code couleur de fiabilite."""
+
+    HEAD = ["Étage", "Pièce", "Source", "L × l (m)", "Surface (m²)",
+            "Périmètre (m)", "Confiance", "Observations"]
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        self.configure(fg_color=COLORS["bg_card"], corner_radius=10)
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(top, text="📐 Surfaces par pièce et par étage",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
+        self.lbl_total = ctk.CTkLabel(top, text="", font=ctk.CTkFont(size=12, weight="bold"),
+                                      text_color=COLORS["accent"])
+        self.lbl_total.pack(side="right")
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent", height=170)
+        self.body.pack(fill="x", padx=8, pady=(0, 8))
+        self._rows: list = []
+        self._empty = ctk.CTkLabel(
+            self.body, text="Aucune surface calculée (plan de structure BA, ou "
+                            "libellés de pièces non lus).",
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_muted"])
+        self._empty.grid(row=0, column=0, sticky="w", padx=6, pady=6)
+
+    def clear(self):
+        for w in self._rows:
+            w.destroy()
+        self._rows = []
+        self.lbl_total.configure(text="")
+        self._empty.grid()
+
+    def update_from_result(self, surfaces: dict):
+        self.clear()
+        reports = surfaces.get("reports") or []
+        if not reports:
+            return
+        self._empty.grid_remove()
+        for c, h in enumerate(self.HEAD):
+            lbl = ctk.CTkLabel(self.body, text=h, font=ctk.CTkFont(size=11, weight="bold"),
+                               text_color=COLORS["text_muted"], anchor="w")
+            lbl.grid(row=0, column=c, sticky="w", padx=6, pady=(0, 4))
+            self.body.grid_columnconfigure(c, weight=1 if c in (1, 7) else 0)
+            self._rows.append(lbl)
+        r = 1
+        for rep in reports:
+            for room in rep.rooms:
+                conf = room.confidence or 0.0
+                color = (COLORS["success"] if conf >= 0.85
+                         else COLORS["steel"] if conf >= 0.5 else COLORS["danger"])
+                lxl = (f"{room.length_m:.2f} × {room.width_m:.2f}"
+                       if room.length_m and room.width_m else "—")
+                area = f"{room.area_m2:.2f}" if room.area_m2 is not None else "NON TROUVÉE"
+                per = f"{room.perimeter_m:.2f}" if room.perimeter_m else "—"
+                obs = " | ".join(room.warnings)[:90] if room.warnings else "OK"
+                vals = [rep.level, room.label, room.source, lxl, area, per,
+                        f"{conf:.2f}", obs]
+                for c, v in enumerate(vals):
+                    lbl = ctk.CTkLabel(
+                        self.body, text=v, anchor="w", font=ctk.CTkFont(size=11),
+                        text_color=color if c in (4, 6) else COLORS["text_light"])
+                    lbl.grid(row=r, column=c, sticky="w", padx=6, pady=1)
+                    self._rows.append(lbl)
+                r += 1
+            sub = ctk.CTkLabel(self.body, text=f"Sous-total {rep.level} : {rep.total_area_m2:.2f} m²",
+                               font=ctk.CTkFont(size=11, weight="bold"), text_color=COLORS["accent"])
+            sub.grid(row=r, column=0, columnspan=8, sticky="w", padx=6, pady=(2, 6))
+            self._rows.append(sub)
+            r += 1
+        self.lbl_total.configure(
+            text=f"TOTAL : {surfaces.get('total_m2', 0):.2f} m²  ·  échelle "
+                 f"{surfaces.get('summary', {}).get('scale') or '?'} px/m")
 
 
 # ============================================================================
@@ -694,113 +923,148 @@ class PlanBAMetreApp(*_DND_BASES):
     def _build_ui(self):
         """Construit l'interface utilisateur."""
 
-        # --- Header ---
-        header = ctk.CTkFrame(self, fg_color=COLORS["primary"], height=104)
+        self.configure(fg_color=COLORS["bg_dark"])
+        self.surfaces_result = None
+
+        # --- Header "chantier" : titre + bande jaune securite + etapes ---
+        header = ctk.CTkFrame(self, fg_color=COLORS["primary"], height=118,
+                              corner_radius=0)
         header.pack(fill="x")
         header.pack_propagate(False)
+        ctk.CTkFrame(header, fg_color=COLORS["accent"], height=5,
+                     corner_radius=0).pack(fill="x", side="bottom")
+
+        right_zone = ctk.CTkFrame(header, fg_color="transparent")
+        right_zone.pack(side="right", padx=20, pady=8)
 
         titre_zone = ctk.CTkFrame(header, fg_color="transparent")
-        titre_zone.pack(side="left", padx=20, pady=6)
+        titre_zone.pack(side="left", padx=20, pady=6, fill="x", expand=True)
         ctk.CTkLabel(
-            titre_zone, text="PlanBA — Métré Extracteur",
-            font=ctk.CTkFont(size=20, weight="bold"),
+            titre_zone, text="🏗️  PlanBA — Métré Extracteur",
+            font=ctk.CTkFont(size=21, weight="bold"),
             text_color="white").pack(anchor="w")
         ctk.CTkLabel(
             titre_zone, text=APP_SUBTITLE,
             font=ctk.CTkFont(size=11),
-            text_color="#C8D9F0", wraplength=900,
+            text_color="#D6E4F5", wraplength=640,
             justify="left").pack(anchor="w")
-
-        # Thème toggle
+        ctk.CTkLabel(
+            right_zone,
+            text="1 PLAN  ›  2 ANALYSE  ›  3 VÉRIFICATION  ›  4 LIVRABLES",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLORS["accent"]).pack(anchor="e")
+        ctk.CTkLabel(
+            right_zone, text="BAEL 91 · RPS 2000 v2011 · NM 01.4.097 · DGA Maroc",
+            font=ctk.CTkFont(size=10), text_color="#D6E4F5").pack(anchor="e")
         self.theme_switch = ctk.CTkSwitch(
-            header, text="☀️",
-            font=ctk.CTkFont(size=11),
-            command=self._toggle_theme,
-            width=50)
-        self.theme_switch.pack(side="right", padx=20)
+            right_zone, text="Thème sombre",
+            font=ctk.CTkFont(size=11), text_color="#D6E4F5",
+            progress_color=COLORS["accent"],
+            command=self._toggle_theme, width=50)
+        self.theme_switch.pack(anchor="e", pady=(4, 0))
         self.theme_switch.select()
 
         # --- Conteneur principal scrollable ---
         self.main_frame = ctk.CTkScrollableFrame(
             self, fg_color="transparent")
-        self.main_frame.pack(fill="both", expand=True, padx=20, pady=15)
+        self.main_frame.pack(fill="both", expand=True, padx=20, pady=12)
 
-        # 1. Zone de dépôt
+        # 1. Zone de dépôt + options cote a cote
+        top_row = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        top_row.pack(fill="x", pady=(0, 10))
+        top_row.grid_columnconfigure(0, weight=5, uniform="top")
+        top_row.grid_columnconfigure(1, weight=6, uniform="top")
         self.drop_zone = DropZone(
-            self.main_frame, height=180,
+            top_row, height=200,
             on_file_selected=self._on_file_selected)
-        self.drop_zone.pack(fill="x", pady=(0, 15))
+        self.drop_zone.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
-        # 2. Options
-        self.options_panel = OptionsPanel(self.main_frame)
-        self.options_panel.pack(fill="x", pady=(0, 15))
+        opts_card = ctk.CTkFrame(top_row, fg_color=COLORS["bg_card"], corner_radius=10)
+        opts_card.grid(row=0, column=1, sticky="nsew")
+        ctk.CTkLabel(opts_card, text="⚙️  Paramètres ingénieur",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(
+            anchor="w", padx=12, pady=(8, 2))
+        self.options_panel = OptionsPanel(opts_card)
+        self.options_panel.pack(fill="x", pady=(0, 8))
 
-        # 3. Bouton d'action
+        # 2. Bouton d'action
         self.btn_action = ctk.CTkButton(
             self.main_frame,
             text="🚀  Lancer l'Analyse & Générer le Métré",
             font=ctk.CTkFont(size=15, weight="bold"),
-            height=50,
+            height=50, corner_radius=10,
             fg_color=COLORS["success"],
             hover_color="#1E8449",
             command=self._run_analysis)
-        self.btn_action.pack(fill="x", pady=(0, 10))
+        self.btn_action.pack(fill="x", pady=(0, 8))
 
-        # 4. Barre de progression
+        # 3. Barre de progression
         self.progress_panel = ProgressPanel(self.main_frame)
-        self.progress_panel.pack(fill="x", pady=(0, 15))
+        self.progress_panel.pack(fill="x", pady=(0, 10))
 
-        # 5. Tableau récapitulatif
+        # 4. Indicateurs
+        self.kpi_strip = KPIStrip(self.main_frame)
+        self.kpi_strip.pack(fill="x", pady=(0, 10))
+
+        # 5. Surfaces (plans d'architecture)
+        self.surfaces_panel = SurfacesPanel(self.main_frame)
+        self.surfaces_panel.pack(fill="x", pady=(0, 10))
+
+        # 6. Tableau récapitulatif BA
         self.summary_table = SummaryTable(self.main_frame)
-        self.summary_table.pack(fill="x", pady=(0, 15))
+        self.summary_table.pack(fill="x", pady=(0, 10))
 
-        # 5b. Rapport métier
-        self.rapport_metier = RapportMetierPanel(self.main_frame, height=350)
-        self.rapport_metier.pack(fill="x", pady=(0, 15))
+        # 6b. Rapport métier
+        self.rapport_metier = RapportMetierPanel(self.main_frame, height=320)
+        self.rapport_metier.pack(fill="x", pady=(0, 10))
 
-        # 6. Boutons d'action finaux
+        # 7. Livrables
         actions_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         actions_frame.pack(fill="x")
+        for c in range(5):
+            actions_frame.grid_columnconfigure(c, weight=1, uniform="act")
+        f12 = ctk.CTkFont(size=12)
 
         self.btn_open_excel = ctk.CTkButton(
-            actions_frame,
-            text="📂  Ouvrir le fichier Excel généré",
-            font=ctk.CTkFont(size=12),
-            height=36,
-            fg_color=COLORS["primary"],
-            hover_color="#1F3A70",
-            state="disabled",
-            command=self._open_excel)
-        self.btn_open_excel.pack(side="left", padx=(0, 10), expand=True, fill="x")
+            actions_frame, text="📂  Métré BA (Excel)", font=f12, height=38,
+            fg_color=COLORS["primary"], hover_color=COLORS["primary_dark"],
+            state="disabled", command=self._open_excel)
+        self.btn_open_excel.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
-        self.btn_open_folder = ctk.CTkButton(
-            actions_frame,
-            text="📁  Ouvrir le dossier de destination",
-            font=ctk.CTkFont(size=12),
-            height=36,
-            fg_color="#555555",
-            hover_color="#444444",
-            command=self._open_output_folder)
-        self.btn_open_folder.pack(side="left", expand=True, fill="x")
+        self.btn_open_surfaces = ctk.CTkButton(
+            actions_frame, text="📐  Surfaces (Excel)", font=f12, height=38,
+            fg_color=COLORS["accent"], hover_color="#D9A200", text_color="#1B1B1B",
+            state="disabled", command=self._open_surfaces_excel)
+        self.btn_open_surfaces.grid(row=0, column=1, sticky="ew", padx=6)
+
+        self.btn_open_overlay = ctk.CTkButton(
+            actions_frame, text="🔍  Overlay d'audit", font=f12, height=38,
+            fg_color=COLORS["steel"], hover_color="#C4621F",
+            state="disabled", command=self._open_overlay)
+        self.btn_open_overlay.grid(row=0, column=2, sticky="ew", padx=6)
 
         self.btn_correct = ctk.CTkButton(
-            actions_frame,
-            text="✏️  Corriger les elements",
-            font=ctk.CTkFont(size=12),
-            height=36,
-            fg_color=COLORS["warning"],
-            hover_color="#E0A800",
-            state="disabled",
-            command=self._open_correction)
-        self.btn_correct.pack(side="left", padx=(10, 0), expand=True, fill="x")
+            actions_frame, text="✏️  Corriger les éléments", font=f12, height=38,
+            fg_color="#555555", hover_color="#444444",
+            state="disabled", command=self._open_correction)
+        self.btn_correct.grid(row=0, column=3, sticky="ew", padx=6)
 
-        # 7. Zone de log
+        self.btn_open_folder = ctk.CTkButton(
+            actions_frame, text="📁  Dossier de sortie", font=f12, height=38,
+            fg_color="#555555", hover_color="#444444",
+            command=self._open_output_folder)
+        self.btn_open_folder.grid(row=0, column=4, sticky="ew", padx=(6, 0))
+
+        # 8. Journal
+        ctk.CTkLabel(self.main_frame, text="📋 Journal d'analyse (traçabilité)",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=COLORS["text_muted"]).pack(anchor="w", pady=(10, 2))
         self.log_text = ctk.CTkTextbox(
-            self.main_frame, height=120,
+            self.main_frame, height=130,
             font=ctk.CTkFont(family="Consolas", size=10),
             fg_color=COLORS["bg_card"],
             text_color=COLORS["text_muted"])
-        self.log_text.pack(fill="x", pady=(10, 0))
+        self.log_text.pack(fill="x", pady=(0, 0))
 
     def _toggle_theme(self):
         if self.theme_switch.get():
@@ -867,6 +1131,17 @@ class PlanBAMetreApp(*_DND_BASES):
         self.btn_action.configure(state="disabled", text="⏳ Analyse en cours...")
         self.btn_open_excel.configure(state="disabled")
         self.btn_open_folder.configure(state="disabled")
+        for name in ("btn_open_surfaces", "btn_open_overlay", "btn_correct"):
+            btn = getattr(self, name, None)
+            if btn is not None:
+                btn.configure(state="disabled")
+        if hasattr(self, "surfaces_panel"):
+            self.surfaces_panel.clear()
+        self.surfaces_result = None
+        try:
+            self.options_panel.apply_vision_env()
+        except Exception:
+            pass
 
         thread = threading.Thread(target=self._analysis_worker,
                                   args=(path,), daemon=True)
@@ -925,8 +1200,16 @@ class PlanBAMetreApp(*_DND_BASES):
                         "; ".join(ingestion_result.errors)
                         or "Adaptateur indisponible")
                 else:
-                    self.plan_data = extractor.extract_from_text_blocks(
-                        ingestion_result.text_blocks)
+                    try:
+                        self.plan_data = extractor.extract_from_text_blocks(
+                            ingestion_result.text_blocks)
+                    except ExtractionError as e:
+                        # Image sans ouvrage BA lisible : on continue vers le
+                        # metre des surfaces au lieu d'une erreur fatale.
+                        from core.local_extractor import partial_plan_data
+                        self.plan_data = partial_plan_data(str(e))
+                        self.after(0, lambda e=e: self._log(
+                            f"Structure BA : {e} → tentative métré des surfaces"))
 
             nom_saisi = None
             try:
@@ -960,14 +1243,87 @@ class PlanBAMetreApp(*_DND_BASES):
                 except Exception as e:
                     self.after(0, lambda: self._log(
                         f"Pipeline : erreur {e}"))
+
+                # Couche Computer Vision hybride (scans / polices SHX)
+                try:
+                    from core.vision_bridge import run_vision_hybride
+                    self.after(0, lambda: self.progress_panel.set_step(
+                        "1/5 : Computer Vision (pages scannées / SHX)...", 0.55))
+                    vision = run_vision_hybride(
+                        file_path, str(get_output_dir()), nom_saisi,
+                        mode="auto",
+                        log=lambda m: self.after(0, lambda m=m: self._log(m.strip())))
+                    if vision["pages_vision"]:
+                        self.plan_data.setdefault("_meta", {})["vision"] = {
+                            "pages": vision["pages_vision"],
+                            "overlays": vision["overlays"],
+                            "xlsx_certifie": vision["xlsx"],
+                            "n_records": len(vision["records"]),
+                        }
+                        c0 = self.plan_data.get("catalogue_types", {})
+                        if (vision["plan_data_fallback"] and not any(
+                                len(c0.get(k, {})) for k in
+                                ("semelles", "poteaux", "poutres"))):
+                            self.after(0, lambda: self._log(
+                                "Extraction vectorielle vide → bascule sur "
+                                "les éléments Computer Vision"))
+                            self.plan_data = vision["plan_data_fallback"]
+                            c = self.plan_data["catalogue_types"]
+                            impl = self.plan_data["implantations"]
+                except Exception as e:
+                    self.after(0, lambda e=e: self._log(
+                        f"Vision : erreur non bloquante ({e})"))
             for a in self.plan_data.get("_meta", {}).get("avertissements", []):
                 self.after(0, lambda a=a: self._log(f"⚠ {a}"))
             for h in self.plan_data.get("_meta", {}).get("hypotheses", []):
                 self.after(0, lambda h=h: self._log(f"• Hypothèse : {h}"))
 
+            # --- Metre des surfaces (plan d'architecture : pieces / etages) ---
+            try:
+                mode = self.options_panel.get_mode()
+                largeur = self.options_panel.get_largeur_hors_tout()
+                hsp = self.options_panel.get_hsp()
+            except Exception:
+                mode, largeur, hsp = "auto", None, 2.80
+            surfaces = {"xlsx": None, "overlays": [], "total_m2": 0.0,
+                        "summary": {}, "reports": [], "warnings": []}
+            if mode in ("auto", "surfaces"):
+                self.after(0, lambda: self.progress_panel.set_step(
+                    "1/5 : Métré des surfaces (pièces / étages)...", 0.58))
+                from core.vision_bridge import run_surface_metre
+                surfaces = run_surface_metre(
+                    file_path, str(get_output_dir()), nom_saisi,
+                    known_width_m=largeur, hauteur_sous_plafond_m=hsp,
+                    log=lambda m: self.after(0, lambda m=m: self._log(m.strip())))
+                self.surfaces_result = surfaces
+                if surfaces["xlsx"]:
+                    self.after(0, lambda s=surfaces: self.surfaces_panel.update_from_result(s))
+                    self.after(0, lambda: self.btn_open_surfaces.configure(state="normal"))
+                    self.after(0, lambda: self.btn_open_overlay.configure(state="normal"))
+
             # Garde-fou partage CLI/UI (source de verite unique)
             from core.local_extractor import verifier_livrables_ou_lever
+            from core.vision_bridge import plan_data_is_placeholder
+            if mode == "surfaces" or plan_data_is_placeholder(self.plan_data):
+                if surfaces["xlsx"]:
+                    # Plan d'architecture : le metre des surfaces EST le livrable
+                    self.after(0, lambda: self.progress_panel.set_step(
+                        "✅ Terminé ! Métré des surfaces généré (aucun ouvrage BA sur ce plan).", 1.0))
+                    self.after(0, lambda s=surfaces: self.kpi_strip.update_values(
+                        self.plan_data, s))
+                    self.after(0, lambda: self.btn_open_folder.configure(state="normal"))
+                    self.after(0, lambda s=surfaces: self._log(
+                        "✅ Plan d'architecture : livrable = métré des surfaces\n"
+                        f"   → {s['xlsx']}\n" + "".join(f"   → {o}\n" for o in s["overlays"])))
+                    success = True
+                    return
+                if mode == "surfaces":
+                    raise ExtractionError(
+                        "Aucune pièce identifiée sur ce plan (libellés de pièces "
+                        "absents ou OCR local indisponible).")
             verifier_livrables_ou_lever(self.plan_data)
+            self.after(0, lambda s=surfaces: self.kpi_strip.update_values(
+                self.plan_data, s))
 
             # --- PHASE CORRECTION : Afficher la vue de correction ---
             self.after(0, lambda: self.progress_panel.set_step(
@@ -1087,6 +1443,28 @@ class PlanBAMetreApp(*_DND_BASES):
             os.startfile(str(xlsx_path))
         else:
             self._show_error(f"Fichier introuvable : {xlsx_path}")
+
+    def _open_surfaces_excel(self):
+        """Ouvre le classeur du metre des surfaces."""
+        xlsx = (self.surfaces_result or {}).get("xlsx") or str(
+            get_output_dir() / "metre_surfaces.xlsx")
+        if Path(xlsx).exists():
+            os.startfile(str(xlsx))
+        else:
+            self._show_error(f"Fichier introuvable : {xlsx}")
+
+    def _open_overlay(self):
+        """Ouvre le premier overlay d'audit (surfaces ou vision BA)."""
+        overlays = list((self.surfaces_result or {}).get("overlays") or [])
+        meta = (self.plan_data or {}).get("_meta", {}) if self.plan_data else {}
+        overlays += list((meta.get("vision") or {}).get("overlays") or [])
+        if not overlays:
+            folder = get_output_dir() / "audit_overlays"
+            overlays = [str(p) for p in sorted(folder.glob("*.png"))] if folder.exists() else []
+        if overlays and Path(overlays[0]).exists():
+            os.startfile(str(overlays[0]))
+        else:
+            self._show_error("Aucun overlay d'audit généré pour ce plan.")
 
     def _open_output_folder(self):
         """Ouvre le dossier de sortie."""
