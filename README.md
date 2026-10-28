@@ -62,13 +62,20 @@ Formats acceptés : `PDF`, `DXF`, `DWG`, `PNG`, `JPG`, `TIFF`, `BMP`, `WEBP`.
 Cliquez sur **🚀 Lancer l'Analyse & Générer le Métré**. La barre de progression indique l'étape en cours. Un plan scanné prend 1 à 6 minutes (lecture optique locale).
 
 ### Étape 4 — Vérifier
-- Les **cartes** en haut résument : béton, acier, surfaces, pièces, **alertes**.
-- Le tableau **Surfaces par pièce** affiche chaque pièce avec sa surface et un niveau de **confiance** (vert = sûr, orange = à vérifier, rouge = non trouvé).
-- Pour les plans BA, une fenêtre **« Corriger les éléments »** s'ouvre : vous pouvez ajuster une dimension lue avant le calcul.
+L'application range les résultats dans **4 onglets** (la page ne défile plus dans tous les sens) :
+
+| Onglet | Contenu |
+|---|---|
+| **📊 Synthèse** | Cartes béton (m³), acier (kg), surfaces (m²), pièces / ouvrages, alertes + récapitulatif des ouvrages |
+| **📐 Surfaces** | Tableau **Surfaces par pièce** (étage, cotes, surface, périmètre, **confiance**, observations) |
+| **🧾 Livrables** | Boutons d'ouverture des fichiers + **Rapport métier** |
+| **📋 Journal** | Tout ce qui a été lu, page par page (traçabilité) |
+
+- Sur les plans BA, une fenêtre **« Corriger les éléments »** s'ouvre : vous pouvez ajuster une dimension lue avant le calcul.
 - Le bouton **🔍 Overlay d'audit** ouvre l'image du plan avec les zones lues entourées (vert OK / orange à vérifier / rouge anomalie).
 
 ### Étape 5 — Récupérer les fichiers
-Boutons **📂 Métré BA (Excel)**, **📐 Surfaces (Excel)**, **📁 Dossier de sortie**.
+Onglet **🧾 Livrables** : **📂 Métré BA (Excel)**, **📐 Surfaces (Excel)**, **🔍 Overlay d'audit**, **✏️ Corriger les éléments**, **📁 Dossier de sortie**.
 Tous les fichiers sont dans le dossier **`output`** à côté de l'application.
 
 ---
@@ -77,8 +84,8 @@ Tous les fichiers sont dans le dossier **`output`** à côté de l'application.
 
 | Fichier | Contenu | Plan BA | Plan archi |
 |---|---|:-:|:-:|
-| `metre_genere.xlsx` | Métré détaillé (gabarit 5 feuilles) | ✅ | |
-| `metre_certifie_BET.xlsx` | Avant-métré, nomenclature acier, DQE (MAD), contrôle des ratios acier, coupe des barres de 12 m | ✅ (pages scannées / AutoCAD) | |
+| `metre_genere.xlsx` | **Métré BA complet, 10 feuilles** : les 5 feuilles certifiées BET d'abord (avant-métré, nomenclature acier, DQE en MAD, contrôle des ratios, coupe des barres de 12 m) puis les annexes (détail quantitatif, armatures, attachement ferraillage, attachement GO, catalogue des armatures) | ✅ | |
+| `metre_certifie_BET.xlsx` | Version « BET » seule (5 feuilles) pour les pages lues par Computer Vision | ✅ (pages scannées / AutoCAD) | |
 | `metre_surfaces.xlsx` | Surfaces par pièce et par étage, second œuvre, audit de l'échelle | | ✅ |
 | `optimisation_chantiers.xlsx` | Nombre de barres de 12 m à commander, chutes | ✅ | |
 | `rapport_metre.pdf` / `note_calculs_chantier.pdf` | Rapport d'audit et note de calculs | ✅ | |

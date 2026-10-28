@@ -1028,11 +1028,40 @@ def generer_via_gabarit(plan_data: dict, output_path: str,
         result_path = injecter_metre_dans_modele(payload, template, output_path)
         # Ajouter la feuille rapport metier
         _ajouter_feuille_rapport_metier(result_path, plan_data)
+        # Feuilles certifiees BET Maroc (formules dynamiques, DQE, ratios)
+        _ajouter_feuilles_bet(result_path, plan_data)
         return result_path
     except Exception as e:
         print(f"⚠ Pont gabarit indisponible ({e}) — repli historique.")
         gen = MetreGenerator(plan_data, moteur="historique")
         return gen.generer(output_path)
+
+
+def _ajouter_feuilles_bet(xlsx_path: str, plan_data: dict) -> bool:
+    """Ajoute au classeur les 5 feuilles du moteur certifie BET Maroc
+    (1_Avant_Metre_BA, 2_Nomenclature_Acier, 3_Bordereau_DQE,
+    4_Controle_BET_Ratios, 5_Optimisation_Barres_12m). Jamais bloquant."""
+    try:
+        import openpyxl
+        from core.bet_contracts import legacy_plan_data_to_records
+        from core.populate_modele_bet import PlanBAExcelPopulator
+        records = legacy_plan_data_to_records(plan_data)
+        if not records:
+            return False
+        projet = plan_data.get("projet", "Projet BTP")
+        if isinstance(projet, dict):
+            projet = projet.get("nom") or "Projet BTP"
+        wb = openpyxl.load_workbook(xlsx_path)
+        pop = PlanBAExcelPopulator(project_name=str(projet))
+        pop.append_to_workbook(wb, records)
+        wb.save(xlsx_path)
+        n_bloq = sum(1 for a in pop.engine.anomalies if a.severity == "BLOQUANT")
+        print(f"   Feuilles BET certifiees ajoutees ({len(records)} ouvrages, "
+              f"{n_bloq} anomalie(s) bloquante(s))")
+        return True
+    except Exception as e:
+        print(f"⚠ Feuilles BET non ajoutees ({e})")
+        return False
 
 
 def _ajouter_feuille_rapport_metier(xlsx_path: str, plan_data: dict):

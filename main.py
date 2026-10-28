@@ -65,7 +65,7 @@ from core.vision_bridge import run_vision_hybride  # noqa: E402
 
 
 def run_cli(input_path, output_dir=None, projet_nom=None, vision_mode="auto",
-            largeur_hors_tout_m=None):
+            largeur_hors_tout_m=None, mode_surfaces=None):
     """Pipeline complet CLI : extraction + metrique + optimisation + rapport."""
     from extract_plan import LocalPlanExtractor
     from build_metre import MetreGenerator
@@ -74,6 +74,7 @@ def run_cli(input_path, output_dir=None, projet_nom=None, vision_mode="auto",
 
     close_splash()
     output_dir = str(output_dir or get_output_dir())
+    os.makedirs(output_dir, exist_ok=True)
 
     plan_json = os.path.join(output_dir, "plan_data.json")
     metre_xlsx = os.path.join(output_dir, "metre_genere.xlsx")
@@ -157,10 +158,22 @@ def run_cli(input_path, output_dir=None, projet_nom=None, vision_mode="auto",
         print(f"  â€¢ Hypothese : {h}")
 
     # --- Metre des surfaces (plan d'architecture : pieces / etages) ---
-    print(f"\n[1c/5] Métré des surfaces (pièces / étages)...")
-    from core.vision_bridge import run_surface_metre
-    surfaces = run_surface_metre(input_path, output_dir, projet_nom,
-                                 known_width_m=largeur_hors_tout_m)
+    # Sur un plan BA (ouvrages lus), l'OCR de surfaces est inutile : il est
+    # saute sauf demande explicite (--surfaces) ou plan sans ouvrage BA.
+    from core.vision_bridge import (IMAGE_EXTS, plan_data_is_placeholder,
+                                    run_surface_metre)
+    lancer_surfaces = (mode_surfaces is True
+                       or plan_data_is_placeholder(plan_data)
+                       or input_ext in IMAGE_EXTS)
+    surfaces = {"xlsx": None, "overlays": [], "total_m2": 0.0,
+                "summary": {}, "reports": [], "warnings": []}
+    if lancer_surfaces:
+        print(f"\n[1c/5] Métré des surfaces (pièces / étages)...")
+        surfaces = run_surface_metre(input_path, output_dir, projet_nom,
+                                     known_width_m=largeur_hors_tout_m)
+    else:
+        print(f"\n[1c/5] Métré des surfaces : plan BA -> ignore "
+              f"(utilisez --surfaces pour le forcer)")
     if surfaces["xlsx"]:
         plan_data.setdefault("_meta", {})["surfaces"] = {
             "xlsx": surfaces["xlsx"], "total_m2": surfaces["total_m2"],
@@ -287,6 +300,9 @@ def main():
     ap.add_argument("--largeur-hors-tout", type=float, default=None,
                     help="Largeur hors-tout reelle du batiment (m) pour "
                          "calibrer l'echelle du metre des surfaces")
+    ap.add_argument("--surfaces", dest="surfaces", action="store_true",
+                    default=None,
+                    help="Forcer le metre des surfaces meme sur un plan BA")
     args = ap.parse_args()
 
     if args.cli:
@@ -295,7 +311,8 @@ def main():
             sys.exit(1)
         run_cli(args.input, args.out, args.projet_nom,
                 vision_mode=args.vision,
-                largeur_hors_tout_m=args.largeur_hors_tout)
+                largeur_hors_tout_m=args.largeur_hors_tout,
+                mode_surfaces=args.surfaces)
     else:
         launch_gui()
 

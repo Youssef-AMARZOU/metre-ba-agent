@@ -157,8 +157,8 @@ class DropZone(ctk.CTkFrame):
 
         # Icône et texte
         self.label_icon = ctk.CTkLabel(
-            self, text="📄", font=ctk.CTkFont(size=40))
-        self.label_icon.pack(pady=(20, 5))
+            self, text="📄", font=ctk.CTkFont(size=32))
+        self.label_icon.pack(pady=(12, 2))
 
         self.label_title = ctk.CTkLabel(
             self, text="Déposez un plan ici",
@@ -168,17 +168,17 @@ class DropZone(ctk.CTkFrame):
         self.label_subtitle = ctk.CTkLabel(
             self, text="PDF, DXF, DWG, PNG, JPG, TIFF, BMP, WEBP",
             font=ctk.CTkFont(size=11), text_color=COLORS["text_muted"])
-        self.label_subtitle.pack(pady=(0, 10))
+        self.label_subtitle.pack(pady=(0, 8))
 
         # Bouton parcourir
         self.btn_browse = ctk.CTkButton(
             self, text="Parcourir...",
             font=ctk.CTkFont(size=12),
-            width=160, height=32,
+            width=160, height=30,
             fg_color=COLORS["primary"],
             hover_color="#1F3A70",
             command=self._browse_file)
-        self.btn_browse.pack(pady=(0, 15))
+        self.btn_browse.pack(pady=(0, 8))
 
         # Label du fichier sélectionné
         self.label_file = ctk.CTkLabel(
@@ -186,7 +186,7 @@ class DropZone(ctk.CTkFrame):
             font=ctk.CTkFont(size=11),
             text_color=COLORS["text_muted"],
             wraplength=500)
-        self.label_file.pack(pady=(0, 10))
+        self.label_file.pack(pady=(0, 5))
 
         # Label de statut de validation (pre-flight)
         self.label_validation = ctk.CTkLabel(
@@ -194,7 +194,7 @@ class DropZone(ctk.CTkFrame):
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=COLORS["text_muted"],
             wraplength=500)
-        self.label_validation.pack(pady=(0, 10))
+        self.label_validation.pack(pady=(0, 6))
 
     def _browse_file(self):
         from tkinter import filedialog
@@ -547,7 +547,8 @@ class SurfacesPanel(ctk.CTkFrame):
         self.lbl_total = ctk.CTkLabel(top, text="", font=ctk.CTkFont(size=12, weight="bold"),
                                       text_color=COLORS["accent"])
         self.lbl_total.pack(side="right")
-        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent", height=170)
+        # Cadre simple (pas de defilement imbrique : la page entiere defile)
+        self.body = ctk.CTkFrame(self, fg_color="transparent")
         self.body.pack(fill="x", padx=8, pady=(0, 8))
         self._rows: list = []
         self._empty = ctk.CTkLabel(
@@ -882,8 +883,8 @@ class PlanBAMetreApp(*_DND_BASES):
 
         # Configuration fenêtre
         self.title(APP_TITLE)
-        self.geometry(APP_SIZE)
-        self.minsize(800, 600)
+        self._fit_to_screen()
+        self.minsize(900, 620)
         self.configure(fg_color=COLORS["bg_dark"])
         self._set_window_icon()
 
@@ -991,18 +992,17 @@ class PlanBAMetreApp(*_DND_BASES):
         self.theme_switch.pack(anchor="e", pady=(4, 0))
         self.theme_switch.select()
 
-        # --- Conteneur principal scrollable ---
-        self.main_frame = ctk.CTkScrollableFrame(
-            self, fg_color="transparent")
-        self.main_frame.pack(fill="both", expand=True, padx=20, pady=12)
+        # --- Page : haut fixe (plan + parametres + action), resultats en onglets
+        self.page = ctk.CTkFrame(self, fg_color="transparent")
+        self.page.pack(fill="both", expand=True, padx=20, pady=(10, 12))
 
         # 1. Zone de dépôt + options cote a cote
-        top_row = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        top_row.pack(fill="x", pady=(0, 10))
+        top_row = ctk.CTkFrame(self.page, fg_color="transparent")
+        top_row.pack(fill="x", pady=(0, 8))
         top_row.grid_columnconfigure(0, weight=5, uniform="top")
         top_row.grid_columnconfigure(1, weight=6, uniform="top")
         self.drop_zone = DropZone(
-            top_row, height=200,
+            top_row, height=150,
             on_file_selected=self._on_file_selected)
         self.drop_zone.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
@@ -1010,44 +1010,59 @@ class PlanBAMetreApp(*_DND_BASES):
         opts_card.grid(row=0, column=1, sticky="nsew")
         ctk.CTkLabel(opts_card, text="⚙️  Paramètres ingénieur",
                      font=ctk.CTkFont(size=13, weight="bold")).pack(
-            anchor="w", padx=12, pady=(8, 2))
+            anchor="w", padx=12, pady=(6, 0))
         self.options_panel = OptionsPanel(opts_card)
-        self.options_panel.pack(fill="x", pady=(0, 8))
+        self.options_panel.pack(fill="x", pady=(0, 4))
 
-        # 2. Bouton d'action
+        # 2. Action + progression sur une seule ligne (haut de page fixe)
+        action_row = ctk.CTkFrame(self.page, fg_color="transparent")
+        action_row.pack(fill="x", pady=(0, 6))
+        action_row.grid_columnconfigure(1, weight=1)
         self.btn_action = ctk.CTkButton(
-            self.main_frame,
+            action_row,
             text="🚀  Lancer l'Analyse & Générer le Métré",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            height=50, corner_radius=10,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            width=350, height=44, corner_radius=10,
             fg_color=COLORS["success"],
             hover_color="#1E8449",
             command=self._run_analysis)
-        self.btn_action.pack(fill="x", pady=(0, 8))
+        self.btn_action.grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.progress_panel = ProgressPanel(action_row)
+        self.progress_panel.grid(row=0, column=1, sticky="ew")
 
-        # 3. Barre de progression
-        self.progress_panel = ProgressPanel(self.main_frame)
-        self.progress_panel.pack(fill="x", pady=(0, 10))
+        # 3. Onglets de resultats : plus de page unique de 1400 px a faire defiler
+        self.tabs = ctk.CTkTabview(
+            self.page, fg_color="transparent",
+            segmented_button_selected_color=COLORS["primary"],
+            segmented_button_selected_hover_color=COLORS["primary_dark"],
+            segmented_button_unselected_color=COLORS["bg_card_alt"],
+            command=self._on_tab_changed)
+        self.tabs.pack(fill="both", expand=True)
+        tab_syn = self.tabs.add("📊  Synthèse")
+        tab_surf = self.tabs.add("📐  Surfaces")
+        tab_liv = self.tabs.add("🧾  Livrables")
+        tab_log = self.tabs.add("📋  Journal")
 
-        # 4. Indicateurs
-        self.kpi_strip = KPIStrip(self.main_frame)
+        self.tab_synthese = self._make_scroll(tab_syn)
+        self.tab_surfaces = self._make_scroll(tab_surf)
+        self.tab_livrables = self._make_scroll(tab_liv)
+        self.tab_journal = self._make_scroll(tab_log)
+        self.main_frame = self.tab_synthese  # compatibilite
+
+        # 4. Indicateurs + tableau récapitulatif BA (onglet Synthese)
+        self.kpi_strip = KPIStrip(self.tab_synthese)
         self.kpi_strip.pack(fill="x", pady=(0, 10))
 
-        # 5. Surfaces (plans d'architecture)
-        self.surfaces_panel = SurfacesPanel(self.main_frame)
-        self.surfaces_panel.pack(fill="x", pady=(0, 10))
-
-        # 6. Tableau récapitulatif BA
-        self.summary_table = SummaryTable(self.main_frame)
+        self.summary_table = SummaryTable(self.tab_synthese)
         self.summary_table.pack(fill="x", pady=(0, 10))
 
-        # 6b. Rapport métier
-        self.rapport_metier = RapportMetierPanel(self.main_frame, height=320)
-        self.rapport_metier.pack(fill="x", pady=(0, 10))
+        # 5. Surfaces (plans d'architecture)
+        self.surfaces_panel = SurfacesPanel(self.tab_surfaces)
+        self.surfaces_panel.pack(fill="x", pady=(0, 4))
 
-        # 7. Livrables
-        actions_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        actions_frame.pack(fill="x")
+        # 6. Livrables
+        actions_frame = ctk.CTkFrame(self.tab_livrables, fg_color="transparent")
+        actions_frame.pack(fill="x", pady=(0, 10))
         for c in range(5):
             actions_frame.grid_columnconfigure(c, weight=1, uniform="act")
         f12 = ctk.CTkFont(size=12)
@@ -1055,24 +1070,28 @@ class PlanBAMetreApp(*_DND_BASES):
         self.btn_open_excel = ctk.CTkButton(
             actions_frame, text="📂  Métré BA (Excel)", font=f12, height=38,
             fg_color=COLORS["primary"], hover_color=COLORS["primary_dark"],
+            text_color_disabled="#B9C7D8",
             state="disabled", command=self._open_excel)
         self.btn_open_excel.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
         self.btn_open_surfaces = ctk.CTkButton(
             actions_frame, text="📐  Surfaces (Excel)", font=f12, height=38,
             fg_color=COLORS["accent"], hover_color="#D9A200", text_color="#1B1B1B",
+            text_color_disabled="#5A4A18",
             state="disabled", command=self._open_surfaces_excel)
         self.btn_open_surfaces.grid(row=0, column=1, sticky="ew", padx=6)
 
         self.btn_open_overlay = ctk.CTkButton(
             actions_frame, text="🔍  Overlay d'audit", font=f12, height=38,
             fg_color=COLORS["steel"], hover_color="#C4621F",
+            text_color_disabled="#4A2A12",
             state="disabled", command=self._open_overlay)
         self.btn_open_overlay.grid(row=0, column=2, sticky="ew", padx=6)
 
         self.btn_correct = ctk.CTkButton(
             actions_frame, text="✏️  Corriger les éléments", font=f12, height=38,
             fg_color="#555555", hover_color="#444444",
+            text_color_disabled="#B9C7D8",
             state="disabled", command=self._open_correction)
         self.btn_correct.grid(row=0, column=3, sticky="ew", padx=6)
 
@@ -1082,16 +1101,79 @@ class PlanBAMetreApp(*_DND_BASES):
             command=self._open_output_folder)
         self.btn_open_folder.grid(row=0, column=4, sticky="ew", padx=(6, 0))
 
-        # 8. Journal
-        ctk.CTkLabel(self.main_frame, text="📋 Journal d'analyse (traçabilité)",
-                     font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color=COLORS["text_muted"]).pack(anchor="w", pady=(10, 2))
+        # 6b. Rapport métier
+        self.rapport_metier = RapportMetierPanel(self.tab_livrables, height=360)
+        self.rapport_metier.pack(fill="both", expand=True, pady=(0, 0))
+
+        # 7. Journal
         self.log_text = ctk.CTkTextbox(
-            self.main_frame, height=130,
+            self.tab_journal, height=420,
             font=ctk.CTkFont(family="Consolas", size=10),
             fg_color=COLORS["bg_card"],
             text_color=COLORS["text_muted"])
-        self.log_text.pack(fill="x", pady=(0, 0))
+        self.log_text.pack(fill="both", expand=True, pady=(0, 0))
+
+        # Molette : pas de 4 px par unite et passage automatique du defilement
+        # a la page quand une zone de texte est arrivee en butee.
+        for tb in (self.log_text, getattr(self.rapport_metier, "textbox", None)):
+            self._bind_wheel_passthrough(tb, self.tab_journal if tb is self.log_text
+                                         else self.tab_livrables)
+
+    def _make_scroll(self, parent):
+        """Cadre defilant fluide (pas de 4 px par unite au lieu de 20)."""
+        frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        frame.pack(fill="both", expand=True)
+        try:
+            frame._parent_canvas.configure(yscrollincrement=4)
+        except Exception:
+            pass
+        return frame
+
+    def _on_tab_changed(self):
+        """Recalcule la mise en page de l'onglet affiche (evite le gel)."""
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+
+    def _bind_wheel_passthrough(self, textbox, target):
+        if textbox is None or target is None:
+            return
+        inner = getattr(textbox, "_textbox", textbox)
+
+        def on_wheel(event):
+            try:
+                first, last = inner.yview()
+            except Exception:
+                first, last = 0.0, 1.0
+            up = event.delta > 0
+            at_edge = (first <= 0.0 and up) or (last >= 1.0 and not up)
+            if at_edge or (first <= 0.0 and last >= 1.0):
+                try:
+                    target._parent_canvas.yview("scroll",
+                                                -int(event.delta / 6), "units")
+                except Exception:
+                    pass
+                return "break"
+            return None
+
+        try:
+            inner.bind("<MouseWheel>", on_wheel, add=True)
+        except Exception:
+            pass
+
+    def _fit_to_screen(self):
+        """Ouvre la fenetre a la taille de l'ecran (86 %) sans deborder."""
+        try:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            w = min(1320, max(980, int(sw * 0.86)))
+            h = min(960, max(680, int(sh * 0.88)))
+            x = max(0, (sw - w) // 2)
+            y = max(0, int((sh - h) / 3))
+            self.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            self.geometry(APP_SIZE)
 
     def _toggle_theme(self):
         if self.theme_switch.get():
@@ -1314,7 +1396,12 @@ class PlanBAMetreApp(*_DND_BASES):
                 mode, largeur, hsp = "auto", None, 2.80
             surfaces = {"xlsx": None, "overlays": [], "total_m2": 0.0,
                         "summary": {}, "reports": [], "warnings": []}
-            if mode in ("auto", "surfaces"):
+            from core.vision_bridge import plan_data_is_placeholder as _is_ph
+            # Auto : sur un PDF ou aucun ouvrage BA n'a ete lu (plan d'archi)
+            # ou sur une image ; jamais d'OCR surfaces inutile sur un plan BA.
+            run_surfaces = (mode == "surfaces" or (
+                mode == "auto" and (ext != ".pdf" or _is_ph(self.plan_data))))
+            if run_surfaces:
                 self.after(0, lambda: self.progress_panel.set_step(
                     "1/5 : Métré des surfaces (pièces / étages)...", 0.58))
                 from core.vision_bridge import run_surface_metre
@@ -1339,6 +1426,7 @@ class PlanBAMetreApp(*_DND_BASES):
                     self.after(0, lambda s=surfaces: self.kpi_strip.update_values(
                         self.plan_data, s))
                     self.after(0, lambda: self.btn_open_folder.configure(state="normal"))
+                    self.after(0, lambda: self.tabs.set("📐  Surfaces"))
                     self.after(0, lambda s=surfaces: self._log(
                         "✅ Plan d'architecture : livrable = métré des surfaces\n"
                         f"   → {s['xlsx']}\n" + "".join(f"   → {o}\n" for o in s["overlays"])))
@@ -1430,6 +1518,7 @@ class PlanBAMetreApp(*_DND_BASES):
             self.after(0, lambda: self.btn_open_excel.configure(state="normal"))
             self.after(0, lambda: self.btn_open_folder.configure(state="normal"))
             self.after(0, lambda: self.btn_correct.configure(state="normal"))
+            self.after(0, lambda: self.tabs.set("🧾  Livrables"))
             self.after(0, lambda: self._log(
                 f"✅ Fichiers générés :\n"
                 f"   → {json_path}\n"
@@ -1464,12 +1553,14 @@ class PlanBAMetreApp(*_DND_BASES):
         messagebox.showerror("Erreur", msg)
 
     def _open_excel(self):
-        """Ouvre le fichier Excel généré."""
+        """Ouvre le metre BA (classeur gabarit + feuilles BET certifiees)."""
         xlsx_path = get_output_dir() / "metre_genere.xlsx"
         if xlsx_path.exists():
             os.startfile(str(xlsx_path))
         else:
-            self._show_error(f"Fichier introuvable : {xlsx_path}")
+            self._show_error(
+                f"Fichier introuvable : {xlsx_path}\n\nLancez d'abord l'analyse "
+                f"d'un plan BA (semelles / poteaux / poutres).")
 
     def _open_surfaces_excel(self):
         """Ouvre le classeur du metre des surfaces."""

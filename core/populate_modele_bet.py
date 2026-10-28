@@ -267,20 +267,39 @@ class PlanBAExcelPopulator:
         return lines, rows
 
     # ------------------------------------------------------------------
-    def process_and_export(self, raw_records: List[ExtractedPlanRecord],
-                           output_xlsx_path: Union[str, Path]) -> Path:
+    def append_to_workbook(self, wb: Workbook,
+                           raw_records: List[ExtractedPlanRecord]) -> None:
+        """Ajoute les 5 feuilles certifiees a un classeur existant (ex.
+        metre_genere.xlsx du gabarit historique). Les feuilles homonymes
+        sont remplacees."""
         lines, rows = self.compute(raw_records)
         crops = [(r.label, r.crop_image_bgr) for r in self.records
                  if r.crop_image_bgr is not None]
-
-        wb = Workbook()
-        wb.remove(wb.active)
+        for name in SHEET_NAMES:
+            if name in wb.sheetnames:
+                wb.remove(wb[name])
         self.layout = {}
         self._build_sheet_avant_metre(wb, lines)
         self._build_sheet_nomenclature_acier(wb, rows)
         self._build_sheet_bordereau_dqe(wb)
         self._build_sheet_controle_bet(wb, crops)
         self._build_sheet_optimisation_12m(wb, rows)
+        # Ordre de lecture : feuilles certifiees en tete, annexes du gabarit
+        # historique (detail quantitatif, attachements, catalogue) ensuite.
+        ordered = ([n for n in SHEET_NAMES if n in wb.sheetnames]
+                   + [n for n in wb.sheetnames if n not in SHEET_NAMES])
+        if ordered and ordered != wb.sheetnames:
+            wb._sheets = [wb[n] for n in ordered]
+        try:
+            wb.active = wb.sheetnames.index(SHEET_NAMES[0])
+        except ValueError:
+            pass
+
+    def process_and_export(self, raw_records: List[ExtractedPlanRecord],
+                           output_xlsx_path: Union[str, Path]) -> Path:
+        wb = Workbook()
+        wb.remove(wb.active)
+        self.append_to_workbook(wb, raw_records)
 
         out = Path(output_xlsx_path)
         out.parent.mkdir(parents=True, exist_ok=True)

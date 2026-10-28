@@ -302,6 +302,104 @@ def _bars_from_specs(specs: List[str]) -> Tuple[List[dict], Optional[dict]]:
     return long_bars, cadres
 
 
+def _specs_from_bars(bars, cadres=None) -> List[str]:
+    specs = [f"{int(b.get('nb') or 0)}HA{int(b.get('phi') or 0)}"
+             for b in (bars or []) if isinstance(b, dict)
+             and int(b.get("nb") or 0) > 0 and int(b.get("phi") or 0) > 0]
+    if isinstance(cadres, dict) and int(cadres.get("phi") or 0) > 0:
+        esp = float(cadres.get("esp") or 0.15)
+        esp_cm = esp * 100 if esp < 3 else esp
+        specs.append(f"Cad HA{int(cadres['phi'])} e={int(round(esp_cm))}")
+    return specs
+
+
+def legacy_plan_data_to_records(plan_data: dict) -> List[ExtractedPlanRecord]:
+    """Pont inverse : `plan_data` legacy (catalogue_types + implantations)
+    -> ExtractedPlanRecord pour le moteur BET certifie. Les quantites sont
+    le nombre d'implantations du type (1 si aucune)."""
+    cat = (plan_data or {}).get("catalogue_types", {}) or {}
+    impl = (plan_data or {}).get("implantations", {}) or {}
+    records: List[ExtractedPlanRecord] = []
+
+    def axes_of(fam: str, ref: str) -> List[str]:
+        out = []
+        for inst in impl.get(fam, []) or []:
+            if str(inst.get("type", "")).upper() != str(ref).upper():
+                continue
+            axe, file_ = inst.get("axe") or "", inst.get("file") or ""
+            out.append(f"{axe}-{file_}" if axe and file_ else (axe or file_ or ""))
+        return out
+
+    def level_of(dims: dict) -> str:
+        return str(dims.get("level") or dims.get("niveau") or "Fondations")
+
+    for ref, dims in (cat.get("semelles") or {}).items():
+        if not isinstance(dims, dict) or dims.get("dimensions_par_defaut"):
+            continue
+        a, b, h = dims.get("a") or 0, dims.get("b") or 0, dims.get("h") or 0
+        if not (a and b):
+            continue
+        fx, fy = dims.get("ferr_x") or {}, dims.get("ferr_y") or {}
+        specs = _specs_from_bars([fx]) + _specs_from_bars([fy])
+        axes = axes_of("semelles", ref)
+        n = [x for x in axes if x]
+        records.append(ExtractedPlanRecord(
+            category="semelle", label=ref, level=level_of(dims), grid_axes=n,
+            qty_plan_coffrage=len(axes) or None,
+            raw_dimensions={"A": a, "B": b, "H": h or 0.0},
+            rebar_specs=specs, source_engines=["legacy_plan_data"]))
+
+    for ref, dims in (cat.get("poteaux") or {}).items():
+        if not isinstance(dims, dict):
+            continue
+        a, b = dims.get("a") or 0, dims.get("b") or 0
+        if not (a and b):
+            continue
+        axes = axes_of("poteaux", ref)
+        records.append(ExtractedPlanRecord(
+            category="poteau", label=ref, level=level_of(dims) if dims.get("level") else "RDC",
+            grid_axes=[x for x in axes if x], qty_plan_coffrage=len(axes) or None,
+            raw_dimensions={"b": a, "h": b, "L": dims.get("hauteur") or 3.0},
+            rebar_specs=_specs_from_bars(dims.get("long_bars"), dims.get("cadres")),
+            source_engines=["legacy_plan_data"]))
+
+    for fam, catg in (("poutres", "poutre"), ("longrines", "longrine"),
+                      ("chainages", "chainage")):
+        for ref, dims in (cat.get(fam) or {}).items():
+            if not isinstance(dims, dict):
+                continue
+            b = dims.get("b") or dims.get("a") or 0
+            h = dims.get("h") or 0
+            if not (b and h):
+                continue
+            portee = dims.get("portee") or dims.get("longueur")
+            raw = {"b": b, "h": h}
+            if portee:
+                raw["L"] = portee
+            axes = axes_of(fam, ref)
+            bars = list(dims.get("filants_inf") or []) + list(dims.get("filants_sup") or [])
+            records.append(ExtractedPlanRecord(
+                category=catg, label=ref,
+                level=level_of(dims) if dims.get("level") else "RDC",
+                grid_axes=[x for x in axes if x], qty_plan_coffrage=len(axes) or None,
+                raw_dimensions=raw,
+                rebar_specs=_specs_from_bars(bars, dims.get("cadres")),
+                source_engines=["legacy_plan_data"]))
+
+    for ref, dims in (cat.get("voiles") or {}).items():
+        if not isinstance(dims, dict):
+            continue
+        ep = dims.get("ep") or dims.get("b") or 0
+        if not ep:
+            continue
+        records.append(ExtractedPlanRecord(
+            category="voile", label=ref, level="RDC",
+            raw_dimensions={"b": ep, "h": dims.get("longueur") or dims.get("h") or 1.0,
+                            "H": dims.get("hauteur") or 3.0},
+            source_engines=["legacy_plan_data"]))
+    return records
+
+
 def records_to_legacy_plan_data(records: List[ExtractedPlanRecord],
                                 projet: str = "Projet extrait (Vision)",
                                 normalizer=None) -> dict:

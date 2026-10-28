@@ -228,6 +228,14 @@ Algorithme **First-Fit Decreasing** par diamètre : les longueurs développées 
 
 `metre_certifie_BET.xlsx` (`core/populate_modele_bet.py`) :
 
+> Le livrable de l'interface, `metre_genere.xlsx`, reçoit ces 5 feuilles via
+> `PlanBAExcelPopulator.append_to_workbook()` (`build_metre._ajouter_feuilles_bet`) :
+> le pont inverse `legacy_plan_data_to_records()` reconstruit les
+> `ExtractedPlanRecord` à partir du `plan_data` du gabarit, puis les feuilles
+> certifiées sont placées **en tête** et les annexes du gabarit conservées
+> derrière (les formules inter-feuilles `'01_Detail_Quantitatif'!K15` restent
+> valides car aucun onglet n'est renommé).
+
 | Feuille | Formules clés |
 |---|---|
 | `1_Avant_Metre_BA` | `J = ROUND(F*G*H*I, 3)` ; total `ROUND(SUM(J6:Jn), 3)` ; colonne témoin Python et écart `ROUND(J−K, 3)` |
@@ -249,6 +257,7 @@ python main.py                                            # interface graphique
 python main.py --cli --input plan.pdf --out sortie/       # pipeline complet
 python main.py --cli --input plan.pdf --vision force      # Computer Vision sur toutes les pages
 python main.py --cli --input plan.pdf --vision off        # chemin vectoriel pur
+python main.py --cli --input plan.pdf --surfaces         # forcer aussi le métré des surfaces
 python main.py --cli --input plan_archi.jpg --largeur-hors-tout 18.90   # surfaces, échelle calibrée
 ```
 
