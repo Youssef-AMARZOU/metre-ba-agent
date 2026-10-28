@@ -8,8 +8,6 @@ de corriger les dimensions, quantites, et autrees avant la generation Excel.
 """
 from __future__ import annotations
 
-import re
-from typing import Optional
 
 import customtkinter as ctk
 
@@ -32,30 +30,71 @@ COLORS = {
 # Familles dont la section se lit en (b, h) = (largeur, hauteur)
 FAMILLES_BH = ("poutres", "longrines", "chainages", "linteaux")
 
+try:  # pragma: no cover - import defensif (UI utilisable seule)
+    from core.label_scanner import SECTION_RULES, rule_for
+except ImportError:  # pragma: no cover
+    SECTION_RULES = {}
 
-def section_label(spec: dict, cat_key: str) -> str:
+    def rule_for(reference, family):  # type: ignore[misc]
+        return ("b", "h") if family in FAMILLES_BH else ("a", "b")
+
+
+#: Colonnes editables par famille (dimensions metier reelles)
+COLUMNS = {
+    "semelles": ["a (m)", "b (m)", "h (m)"],
+    "massifs": ["a (m)", "b (m)", "h (m)"],
+    "radiers": ["a (m)", "b (m)", "h (m)"],
+    "escaliers": ["a (m)", "b (m)", "h (m)"],
+    "poteaux": ["a (m)", "b (m)", "Hauteur (m)"],
+    "poutres": ["b (m)", "h (m)", "Longueur (m)"],
+    "longrines": ["b (m)", "h (m)", "Longueur (m)"],
+    "chainages": ["b (m)", "h (m)", "Longueur (m)"],
+    "linteaux": ["b (m)", "h (m)", "Longueur (m)"],
+    "poutrelles": ["b (m)", "h (m)", "Longueur (m)"],
+    "dalles": ["h (m)"],
+    "murs": ["a (m)", "h (m)"],
+    "voiles": ["a (m)", "h (m)"],
+    "pieux": ["a (m)"],
+    "futs": ["a (m)", "b (m)"],
+}
+DEFAULT_COLUMNS = ["a (m)", "b (m)", "h (m)"]
+
+#: Colonne d'affichage -> cle du modele de donnees
+KEY_MAP = {
+    "a (m)": "a", "b (m)": "b", "h (m)": "h",
+    "Hauteur (m)": "hauteur", "Longueur (m)": "longueur",
+}
+
+
+def section_label(spec: dict, cat_key: str, ref: str = "") -> str:
     """Section (cm) affichable, sans jamais inventer de dimension.
 
     1. ``section_str`` si l'extracteur l'a produite ;
-    2. sinon derivee des dimensions reellement presentes
-       (``b x h`` pour les poutres, ``a x b`` pour les semelles/poteaux) ;
+    2. sinon derivee des dimensions reellement presentes, selon la regle de
+       la famille (``a x b``, ``b x h``, ``ep x H`` ou ``e=..``) ;
     3. sinon ``"?"`` (valeur non cotee sur le plan).
     """
     sec = str(spec.get("section_str") or "").strip()
     if sec:
         return sec
 
-    def cm(val):
+    rule = rule_for(ref, cat_key)
+    vals: list[float] = []
+    for key in rule:
         try:
-            f = float(val)
+            v = float(spec.get(key) or 0)
         except (TypeError, ValueError):
-            return None
-        return round(f * 100) if f > 0 else None
-
-    a, b, h = cm(spec.get("a")), cm(spec.get("b")), cm(spec.get("h"))
-    if cat_key in FAMILLES_BH:
-        return f"{b}x{h}" if (b and h) else "?"
-    return f"{a}x{b}" if (a and b) else "?"
+            return "?"
+        if v <= 0:
+            return "?"
+        vals.append(v * 100.0)
+    if not vals:
+        return "?"
+    if cat_key == "dalles":
+        return f"e={round(vals[0])}"
+    if len(vals) == 3:
+        vals = vals[:2]
+    return "x".join(str(round(v)) for v in vals)
 
 
 def _fmt_dim(raw) -> str:
@@ -78,6 +117,12 @@ FAMILLES = [
     ("voiles", "VOILES", "V"),
     ("dalles", "DALLES", "D"),
     ("escaliers", "ESCALIERS", "ESC"),
+    ("massifs", "MASSIFS", "MS"),
+    ("linteaux", "LINTEAUX", "LT"),
+    ("radiers", "RADIERS", "R"),
+    ("poutrelles", "POUTRELLES", "PL"),
+    ("pieux", "PIEUX", "PIE"),
+    ("futs", "FUTS", "F"),
 ]
 
 
@@ -177,18 +222,10 @@ class CorrectionView(ctk.CTkToplevel):
 
     def _build_table(self, parent, cat_key: str, elements: dict):
         """Construit un tableau editable avec CRUD (Ajout/Suppression)."""
-        # En-tetes selon la famille
-        headers = ["Reference", "Section (cm)", "a (m)", "b (m)"]
-        if cat_key == "poutres":
-            # Pour une poutre : b = largeur, h = hauteur, la portee n'est
-            # pas 'a'. On expose donc explicitement la portee.
-            headers = ["Reference", "Section (cm)", "b (m)", "h (m)",
-                       "Longueur (m)"]
-        elif cat_key == "poteaux":
-            headers.extend(["Hauteur (m)"])
-        elif cat_key == "semelles":
-            headers.extend(["h (m)"])
-        headers.append("Nombre")
+        # En-tetes selon la famille (regles generiques partagees)
+        headers = (["Reference", "Section (cm)"]
+                   + COLUMNS.get(cat_key, DEFAULT_COLUMNS)
+                   + ["Nombre"])
 
         # Frame avec scroll
         scroll_frame = ctk.CTkScrollableFrame(
@@ -242,16 +279,11 @@ class CorrectionView(ctk.CTkToplevel):
         for ref in sorted(elements.keys()):
             spec = elements[ref]
             valeurs = {"Reference": ref,
-                       "Section (cm)": section_label(spec, cat_key)}
+                       "Section (cm)": section_label(spec, cat_key, ref)}
             # Remplir les dimensions
             dim_keys = [k for k in headers if k not in ("Reference", "Section (cm)", "Nombre")]
             for dk in dim_keys:
-                # Mapper le nom de colonne vers la cle du dict
-                key_map = {
-                    "a (m)": "a", "b (m)": "b", "h (m)": "h",
-                    "Hauteur (m)": "hauteur", "Longueur (m)": "longueur",
-                }
-                raw = spec.get(key_map.get(dk, dk), "")
+                raw = spec.get(KEY_MAP.get(dk, dk), "")
                 if dk == "Hauteur (m)" and raw in (None, "", 0):
                     raw = spec.get("hauteur_p", "")
                 valeurs[dk] = _fmt_dim(raw)
@@ -329,10 +361,7 @@ class CorrectionView(ctk.CTkToplevel):
         cat = self.corrected_data.get("catalogue_types", {})
 
         # Mapping colonne -> cle du spec
-        key_map = {
-            "a (m)": "a", "b (m)": "b", "h (m)": "h",
-            "Hauteur (m)": "hauteur", "Longueur (m)": "longueur",
-        }
+        key_map = KEY_MAP
 
         for cat_key, entries in self.tables.items():
             if cat_key not in cat:
@@ -349,6 +378,9 @@ class CorrectionView(ctk.CTkToplevel):
                         continue
                     val_str = entry.get().strip()
                     if not val_str:
+                        # Champ vide par l'utilisateur = valeur retiree
+                        if header != "Nombre":
+                            spec.pop(key_map.get(header, header), None)
                         continue
                     try:
                         if header == "Nombre":
@@ -358,19 +390,30 @@ class CorrectionView(ctk.CTkToplevel):
                     except ValueError:
                         pass
 
-                # Mettre a jour section_str si les dimensions ont change
-                a = spec.get("a") or 0
-                b = spec.get("b") or 0
-                h = spec.get("h") or 0
-                if cat_key in FAMILLES_BH:
-                    if b > 0 and h > 0:
-                        spec["section_str"] = f"{b*100:.0f}x{h*100:.0f}"
-                elif a > 0 and b > 0:
-                    spec["section_str"] = f"{a*100:.0f}x{b*100:.0f}"
-
                 # Utiliser la reference du champ Reference si modifiee
                 ref_entry = fields.get("Reference")
                 final_ref = ref_entry.get().strip() if ref_entry else ref
+
+                # Recalculer la section selon la regle de la famille
+                rule = rule_for(final_ref, cat_key)
+                vals = []
+                for k in rule:
+                    try:
+                        v = float(spec.get(k) or 0)
+                    except (TypeError, ValueError):
+                        v = 0
+                    if v <= 0:
+                        vals = []
+                        break
+                    vals.append(v * 100.0)
+                if vals:
+                    if cat_key == "dalles":
+                        spec["section_str"] = f"e={round(vals[0])}"
+                    else:
+                        shown = vals[:2] if len(vals) == 3 else vals
+                        spec["section_str"] = "x".join(
+                            str(round(v)) for v in shown)
+
                 if final_ref:
                     new_elements[final_ref] = spec
 

@@ -24,6 +24,15 @@ import sys
 from pathlib import Path
 from core.tokenizer import expand_words
 from core.tokenizer import decompose_etiquette_technique
+from core.label_scanner import (
+    SECTION_RULES,
+    LabelDims,
+    parse_label,
+    parse_reference,
+    parse_section_values,
+    register_label,
+    rule_for,
+)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 logger = logging.getLogger(__name__)
@@ -418,6 +427,13 @@ class VectorPlanExtractor:
         words = []
         for b in text_blocks:
             t = (b.get("text") or "").strip()
+            # Blocs DXF/IFC : la reference et les dimensions sont deux cles
+            # distinctes ('reference' + 'dims_text') -> on recompose un token
+            # lisible 'S2(110x110x25)' pour le scan universel.
+            ref = str(b.get("reference") or "").strip()
+            dims_txt = str(b.get("dims_text") or "").strip()
+            if not t and ref:
+                t = f"{ref}({dims_txt})" if dims_txt else ref
             if not t or t.startswith("[BLOCK:"):
                 continue
             words.append({
@@ -638,6 +654,11 @@ class VectorPlanExtractor:
         self._extract_poteaux_page(words, page_num)
         self._extract_poutres_page(words, page_num)
 
+        # 6. SCAN GENERIQUE : toute etiquette 'REF + dimensions', toutes
+        # familles (S/P/N/M/V/D/LG/CH/POT/PD/BN...). Execute en dernier pour
+        # completer les lectures specialisees sans creer de doublons.
+        self._scan_generic_labels(words, page_num)
+
         # Compteurs annexes
         self.massifs += sum(1 for w in words
                             if w["text"].lower().startswith("massif"))
@@ -679,6 +700,9 @@ class VectorPlanExtractor:
                 except Exception:
                     pass
             if self._parse_poteaux_table(data):
+                found = True
+            # Lecture universelle : 'REF | A x B [x H]' quel que soit l'en-tete
+            if self._parse_generic_table(data, page_num) > 0:
                 found = True
         return found
 
@@ -788,6 +812,7 @@ class VectorPlanExtractor:
                     spec["ferr_y"] = {"nb": int(mf.group(1)),
                                       "phi": int(mf.group(2))}
             if spec:
+                spec["section_source"] = "table"
                 self._merge_semelle(tk, spec)
                 pages = self._semelles_pages.setdefault(tk, [])
                 if page_num is not None and page_num not in pages:
@@ -876,6 +901,7 @@ class VectorPlanExtractor:
             spec["a"] = _dim_cm_to_m(int(md.group(1)))
             spec["b"] = _dim_cm_to_m(int(md.group(2)))
             spec["section_str"] = f"{md.group(1)}x{md.group(2)}"
+            spec["section_source"] = "table"
         else:
             # Fallback: dimensions sur lignes séparées (ex: "25\n40" dans tableau poteaux)
             lines_stripped = [l.strip() for l in cell.split('\n') if l.strip()]
@@ -1048,6 +1074,7 @@ class VectorPlanExtractor:
                     if (w["text"].isdigit() and abs(w["x"] - hx) < eps * 1.2
                             and abs(w["y"] - h_row) < eps * 1.2):
                         spec["h"] = _dim_cm_to_m(int(w["text"]))
+                        spec["section_source"] = "table"
                         break
             ferra_rows = [w for w in pw
                           if w["text"].lower().startswith("ferraillage")]
@@ -1846,6 +1873,7 @@ class VectorPlanExtractor:
                     spec["a"] = _dim_cm_to_m(int(m.group(1)))
                     spec["b"] = _dim_cm_to_m(int(m.group(2)))
                     spec["section_str"] = f"{m.group(1)}x{m.group(2)}"
+                    spec["section_source"] = "label"
                 bars = _dedupe_bars(
                     [{"nb": int(g.group(1)), "phi": int(g.group(2))}
                      for g in re.finditer(
@@ -1960,11 +1988,13 @@ class VectorPlanExtractor:
                     if 30 < dy < 50 and txt.isdigit() and 15 <= int(txt) <= 80:
                         if "a" not in spec:
                             spec["a"] = _dim_cm_to_m(int(txt))
+                            spec["section_source"] = "heuristic"
 
                     # Hauteur (nombre pur 20-100) — y ~ +50..+75
                     if 50 < dy < 80 and txt.isdigit() and 15 <= int(txt) <= 100:
                         if "b" not in spec:
                             spec["b"] = _dim_cm_to_m(int(txt))
+                            spec["section_source"] = "heuristic"
 
                     # Cadres (Cad+2Ep T8, etc.) — y ~ +70..+90
                     if 65 < dy < 95:
@@ -2014,6 +2044,7 @@ class VectorPlanExtractor:
                     "h": _dim_cm_to_m(h_cm),
                     "prefix": prefix,
                     "section_str": f"{b_cm}x{h_cm}",
+                    "section_source": "label",
                 })
                 continue
             # Section inline en un seul mot : 'N1(25x30)' (page 6 du R+2)
@@ -2029,6 +2060,7 @@ class VectorPlanExtractor:
                     "h": _dim_cm_to_m(h_cm),
                     "prefix": prefix,
                     "section_str": f"{b_cm}x{h_cm}",
+                    "section_source": "label",
                 })
                 continue
             m = POUTRE_LABEL_RX.match(w["text"])
@@ -2074,6 +2106,7 @@ class VectorPlanExtractor:
                 m = POUTRE_DIM_WORD_RX.match(w["text"])
                 spec["b"] = _dim_cm_to_m(int(m.group(1)))
                 spec["h"] = _dim_cm_to_m(int(m.group(2)))
+                spec["section_source"] = "heuristic"
             if spec:
                 self.global_catalogue["poutres"][tk] = spec
             elif tk not in self.global_catalogue["poutres"]:
@@ -2214,11 +2247,12 @@ class VectorPlanExtractor:
         """Derive ``section_str`` des qu'une section est reellement connue.
 
         Regle de rigueur : on n'ecrit JAMAIS une section inventee. La chaine
-        ``section_str`` n'est produite que si les DEUX dimensions requises
-        sont lues sur le plan (ou portees par la reference).
+        ``section_str`` n'est produite que si TOUTES les dimensions de la
+        famille sont lues sur le plan (ou portees par la reference).
 
-        * poutres / longrines / linteaux / chainages : ``b x h``
-        * semelles / massifs / radiers / poteaux : ``a x b``
+        Regles par famille (cf. ``core.label_scanner.SECTION_RULES``) :
+        ``a x b [x h]`` pour semelles/poteaux, ``b x h`` pour poutres,
+        ``ep x H`` pour murs/voiles, ``e=..`` pour dalles.
 
         Les elements restes incomplets sont signales dans ``hypotheses``
         (statut NON_RESOLU), jamais completes par une valeur par defaut.
@@ -2239,32 +2273,224 @@ class VectorPlanExtractor:
 
                 # 1) Reference auto-porteuse : 'N1_25x40', 'BN_25x30', 'P1_25x35'
                 k_b, k_h = self._dims_from_key(ref)
-                if k_b is not None:
-                    if fam in self._FAMILLES_BH:
-                        spec.setdefault("b", k_b / 100.0)
-                        spec.setdefault("h", k_h / 100.0)
-                    else:
-                        spec.setdefault("a", k_b / 100.0)
-                        spec.setdefault("b", k_h / 100.0)
+                if k_b is not None and fam in SECTION_RULES:
+                    rule = SECTION_RULES[fam]
+                    if len(rule) >= 2:
+                        spec.setdefault(rule[0], k_b / 100.0)
+                        spec.setdefault(rule[1], k_h / 100.0)
 
                 # 2) Derivation depuis les dimensions lues
-                if not spec.get("section_str"):
-                    if fam in self._FAMILLES_BH:
-                        b, h = cm(spec.get("b")), cm(spec.get("h"))
-                        if b and h:
-                            spec["section_str"] = f"{round(b)}x{round(h)}"
-                    else:
-                        a, b = cm(spec.get("a")), cm(spec.get("b"))
-                        if a and b:
-                            spec["section_str"] = f"{round(a)}x{round(b)}"
+                if not spec.get("section_str") and fam in SECTION_RULES:
+                    rule = rule_for(ref, fam)
+                    vals = [cm(spec.get(k)) for k in rule]
+                    if vals and all(vals):
+                        shown = vals[:2] if len(vals) == 3 else vals
+                        if fam == "dalles":
+                            spec["section_str"] = f"e={round(shown[0])}"
+                        else:
+                            spec["section_str"] = "x".join(
+                                str(round(v)) for v in shown)
 
                 # 3) Section encore inconnue -> tracee, pas inventee
-                if not spec.get("section_str") and fam in (
-                        self._FAMILLES_BH + self._FAMILLES_AB):
+                if not spec.get("section_str") and fam in SECTION_RULES:
                     note = (f"{fam}/{ref}: section non cotee sur le plan "
                             f"(NON_RESOLU) — a completer avant metre")
                     if note not in self.hypotheses:
                         self.hypotheses.append(note)
+
+        self._dedupe_catalogue(cat)
+
+    def _dedupe_catalogue(self, cat):
+        """Fusionne les doublons d'un meme type et les artefacts de decoupe.
+
+        1. ``BN`` + ``BN_25x30`` (meme section) -> une seule entree ;
+        2. reference sans aucune lettre (``1`` issu de la decoupe de ``SEM1``)
+           -> fusionnee dans l'entree equivalente portant un prefixe.
+        """
+        for fam, elems in (cat or {}).items():
+            if not isinstance(elems, dict):
+                continue
+
+            # 1. reference nue vs cle composite
+            for ref in list(elems):
+                spec = elems.get(ref)
+                if not isinstance(spec, dict):
+                    continue
+                sec = str(spec.get("section_str") or "")
+                if not sec:
+                    continue
+                composite = f"{ref}_{sec}"
+                if composite == ref or composite not in elems:
+                    continue
+                target = elems[composite]
+                for k, v in spec.items():
+                    target.setdefault(k, v)
+                del elems[ref]
+
+            # 2. artefacts sans lettre ('1', '12') issus d'une decoupe
+            named = {}
+            for ref, spec in elems.items():
+                if isinstance(spec, dict) and re.search(r"[A-Za-z]", ref):
+                    sig = (spec.get("section_str"), spec.get("a"),
+                           spec.get("b"), spec.get("h"))
+                    if any(x is not None for x in sig):
+                        named.setdefault(sig, ref)
+            for ref in list(elems):
+                if re.search(r"[A-Za-z]", ref):
+                    continue
+                spec = elems.get(ref)
+                if not isinstance(spec, dict):
+                    continue
+                sig = (spec.get("section_str"), spec.get("a"),
+                       spec.get("b"), spec.get("h"))
+                target = named.get(sig)
+                if not target:
+                    continue
+                for k, v in spec.items():
+                    elems[target].setdefault(k, v)
+                del elems[ref]
+                note = (f"{fam}: reference '{ref}' (artefact de decoupe) "
+                        f"fusionnee dans '{target}' — meme section")
+                if note not in self.hypotheses:
+                    self.hypotheses.append(note)
+
+    # ------------------------------------------------------------------
+    # E. Scan generique des etiquettes (independant du plan et du format)
+    # ------------------------------------------------------------------
+    def _scan_generic_labels(self, words, page_num):
+        """Lit TOUTE etiquette 'REF + dimensions', toutes familles.
+
+        C'est la couche universelle : un plan qui ecrit ``M1(20x30)``,
+        ``POT3 30x30`` ou ``N1-(25X40)`` est compris sans code dedie.
+        Les moteurs PDF/OCR/DXF separent parfois la reference et les
+        dimensions en deux mots : on les re-apparie par proximite sur la
+        meme ligne (tolere uniquement si la distance est faible).
+        Retourne le nombre d'etiquettes enregistrees.
+        """
+        n = 0
+        words = list(words or [])
+        pairs = self._pair_labels(words)
+        for idx, w in enumerate(words):
+            label = parse_label(w.get("text", "")) or pairs.get(idx)
+            if label is None:
+                continue
+            register_label(self.global_catalogue, label, page=page_num)
+            n += 1
+        return n
+
+    @staticmethod
+    def _pair_labels(words):
+        """Re-apparie ``REF`` + ``(25x35)`` ecrits dans deux mots voisins.
+
+        Seuls les tokens de dimensions ENTRE PARENTHESES sont apparies (cas
+        produit par la decoupe PDF/OCR), et l'appariement doit etre MUTUEL :
+        si deux references se disputent les memes dimensions, aucune n'est
+        retenue (pas de dimension attribuee au hasard).
+        """
+        refs: dict[int, tuple[str, str]] = {}
+        dims: dict[int, tuple[float, ...]] = {}
+
+        for i, w in enumerate(words):
+            txt = str(w.get("text", "")).strip()
+            if parse_label(txt) is not None:
+                continue
+            parsed = parse_reference(txt)
+            if parsed:
+                refs[i] = parsed
+                continue
+            if txt.startswith("("):
+                vals = parse_section_values(txt)
+                if vals:
+                    dims[i] = vals
+
+        if not refs or not dims:
+            return {}
+
+        def _pos(w, key, default=0.0):
+            try:
+                return float(w.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        # meilleur token de dimensions pour chaque reference
+        forward: dict[int, tuple[float, int]] = {}
+        for i in refs:
+            w = words[i]
+            best = None
+            for j in dims:
+                o = words[j]
+                if abs(_pos(o, "y") - _pos(w, "y")) > 6:
+                    continue
+                dx = _pos(o, "x") - _pos(w, "x1", _pos(w, "x"))
+                # Tokens issus d'une decoupe : meme bbox -> chevauchement = 0
+                if dx < 0 and _pos(o, "x1", _pos(o, "x")) > _pos(w, "x"):
+                    dx = 0.0
+                if dx < -6 or dx > 140:
+                    continue
+                if best is None or dx < best[0]:
+                    best = (dx, j)
+            if best is not None:
+                forward[i] = best
+
+        # appariement mutuel uniquement
+        reverse: dict[int, tuple[float, int]] = {}
+        for i, (dx, j) in forward.items():
+            if j not in reverse or dx < reverse[j][0]:
+                reverse[j] = (dx, i)
+
+        out: dict[int, LabelDims] = {}
+        for i, (dx, j) in forward.items():
+            if reverse.get(j, (None, None))[1] != i:
+                continue
+            family, reference = refs[i]
+            rule = rule_for(reference, family)
+            values = dims[j][:len(rule)] if rule else dims[j]
+            out[i] = LabelDims(family=family, reference=reference,
+                               values_cm=tuple(float(v) for v in values),
+                               rule=rule, source="label_pair")
+        return out
+
+    def _parse_generic_table(self, data, page_num=None):
+        """Lit toute ligne de tableau 'REF | dimensions', toutes familles.
+
+        Complete le scan des etiquettes pour les nomenclatures dont la
+        reference et la section sont dans deux cellules distinctes, quel que
+        soit l'en-tete du tableau (et non plus seulement 'Repere / AxB / H').
+        """
+        n = 0
+        for row in data or []:
+            cells = [str(c or "").strip() for c in row]
+            if not cells:
+                continue
+            for ref_cell in cells:
+                parsed = parse_reference(ref_cell)
+                if not parsed:
+                    continue
+                family, reference = parsed
+                values = None
+                for other in cells:
+                    if other is ref_cell:
+                        continue
+                    values = parse_section_values(other)
+                    if values:
+                        break
+                if not values:
+                    break
+                rule = rule_for(reference, family)
+                if len(values) > len(rule):
+                    values = values[:len(rule)]
+                label = LabelDims(family=family, reference=reference,
+                                  values_cm=tuple(float(v) for v in values),
+                                  rule=rule, source="table")
+                key = register_label(self.global_catalogue, label,
+                                     page=page_num)
+                if family == "semelles":
+                    pages = self._semelles_pages.setdefault(key, [])
+                    if page_num is not None and page_num not in pages:
+                        pages.append(page_num)
+                n += 1
+                break
+        return n
 
     def _merge_semelle(self, tk, spec):
         cur = self.global_catalogue["semelles"].setdefault(tk, {})
