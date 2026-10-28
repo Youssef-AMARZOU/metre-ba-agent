@@ -146,3 +146,61 @@ def run_vision_hybride(input_path, output_dir, projet_nom=None,
     except Exception as e:
         log(f"  Vision : erreur non bloquante ({e})")
         return empty
+
+
+def run_dimension_resolution(elements=None, cotations=None, output_dir="output",
+                             projet_nom=None, specs=None, config=None,
+                             dxf_path=None, log=print):
+    """Resolution des dimensions non ecrites (M1..M5) + classeur d'annexe.
+
+    - ``elements`` : ``DrawingElement`` de la page (alignement overlay + M1).
+    - ``cotations`` : ``Cote`` deja lues (PDF / OCR via
+      ``cotations_from_number_centers``) ; ``dxf_path`` lit les DIMENSION DXF.
+    - ``specs`` : ``ElementSpec`` explicites (axes, appuis, bbox, polygone).
+      Par defaut une spec M1 est construite pour chaque element.
+
+    Retourne ``{'xlsx', 'annotations', 'plan', 'axes', 'warnings', 'aligned'}``
+    et ne leve jamais. Les annotations sont alignees sur ``elements`` et se
+    passent telles quelles a ``render_audit_overlay(metre_annotations=...)``.
+    """
+    empty = {"xlsx": None, "annotations": [], "plan": None, "axes": {},
+             "warnings": [], "aligned": False}
+    try:
+        from core.dimension_resolver import (
+            DimensionResolver,
+            ResolverConfig,
+            cotations_from_dxf,
+            specs_from_drawing_elements,
+        )
+
+        cfg = config or ResolverConfig()
+        resolver = DimensionResolver(cfg)
+        if dxf_path:
+            resolver.add_cotes(cotations_from_dxf(
+                dxf_path, unit=cfg.unit, dxf_unit=cfg.unit))
+        if cotations:
+            resolver.add_cotes(cotations)
+        if resolver.cotes:
+            resolver.calibrate()
+        if specs is None:
+            specs = specs_from_drawing_elements(elements or [])
+        if not specs:
+            log("  Dimensions : aucun element a resoudre")
+            return empty
+
+        plan = resolver.resolve_plan(specs)
+        xlsx = plan.to_workbook(Path(output_dir) / "metre_dimensions.xlsx")
+        warnings = [f"{e.element_id} {e.status.value} : {' | '.join(e.notes)}"
+                    for e in plan.elements if e.status.value != "OK"]
+        aligned = bool(elements) and len(elements) == len(plan.elements)
+        n_ok = sum(1 for e in plan.elements if e.status.value == "OK")
+        log(f"  Dimensions : {len(plan.elements)} element(s), {n_ok} OK, "
+            f"{len(warnings)} a verifier -> {xlsx}")
+        for w in warnings[:10]:
+            log(f"    ⚠ {w}")
+        return {"xlsx": xlsx, "annotations": plan.annotations(),
+                "plan": plan, "axes": plan.axes, "warnings": warnings,
+                "aligned": aligned}
+    except Exception as e:
+        log(f"  Dimensions : erreur non bloquante ({e})")
+        return empty

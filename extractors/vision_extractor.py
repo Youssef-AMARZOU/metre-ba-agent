@@ -690,16 +690,24 @@ class PlanBAVisionExtractor:
         page_num: int = 1,
         table_rois: Optional[Sequence[BBox]] = None,
         max_side_px: int = 4000,
+        metre_annotations: Optional[Sequence[Any]] = None,
     ) -> str:
         """Dessine les bbox (vert conf>=0.90 et valide, orange a verifier,
-        rouge anomalie BET) et sauvegarde output/audit_overlays/page_{n}.png."""
+        rouge anomalie BET) et sauvegarde output/audit_overlays/page_{n}.png.
+
+        ``metre_annotations`` : sequence alignee sur ``elements``, chaque
+        entree etant un objet exposant ``text`` et ``color_bgr`` (typiquement
+        ``core.dimension_resolver.OverlayAnnotation``). Le label de metre
+        (ex. ``S=4,25 m2 [SOM OK 1.00]``) est ajoute sous la bbox avec la
+        meme charte vert / orange que le label principal.
+        """
         import cv2
 
         anomalies = {str(a).upper() for a in (anomaly_labels or [])}
         canvas = img_bgr.copy()
         for x, y, w, h in (table_rois or []):
             cv2.rectangle(canvas, (x, y), (x + w, y + h), (200, 120, 0), 3)
-        for el in elements:
+        for idx, el in enumerate(elements):
             x, y, w, h = el.bbox
             if el.label in anomalies or el.warnings and el.confidence < 0.6:
                 color, tag = (0, 0, 255), "ANOMALIE"
@@ -712,6 +720,19 @@ class PlanBAVisionExtractor:
             text = f"{el.label} {dims} [{tag} {el.confidence:.2f}]"
             cv2.putText(canvas, text, (x, max(15, y - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+
+            annotation = None
+            if metre_annotations is not None and idx < len(metre_annotations):
+                annotation = metre_annotations[idx]
+            if annotation is not None:
+                ann_text = str(getattr(annotation, "text", "") or "")
+                ann_color = tuple(getattr(annotation, "color_bgr", color))
+                if ann_text:
+                    canvas_h = canvas.shape[0]
+                    cv2.putText(canvas, ann_text,
+                                (x, min(canvas_h - 6, y + h + 20)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, ann_color, 2,
+                                cv2.LINE_AA)
 
         H, W = canvas.shape[:2]
         if max(H, W) > max_side_px:
