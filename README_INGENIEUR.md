@@ -89,7 +89,11 @@ Arborescence :
 ```
 metre-ba-agent/
 ├── main.py                        # CLI + lancement GUI (--cli, --vision, --largeur-hors-tout)
-├── ui/desktop_app.py              # Interface PlanBA Pro (KPI, surfaces, overlay, paramètres ingénieur)
+├── ui/
+│   ├── desktop_app.py             # Fenêtre principale : sidebar, modale « Nouveau métré », moteur d'analyse
+│   ├── design.py                  # Jetons de thème + widgets (Card, Badge, DataTable, Donut, HBarChart)
+│   ├── home.py                    # Accueil « Projets récents » (cartes, recherche, grille responsive)
+│   └── workspace.py               # Résultats : KPI, graphiques, limites, onglets ÉLÉMENTS→JOURNAL
 ├── core/
 │   ├── bet_contracts.py           # DrawingElement, ExtractedPlanRecord, AvantMetreLine, RebarScheduleRow, AuditAnomaly
 │   ├── moroccan_bet_engine.py     # MoroccanBETEngine + PlanBAGatekeeper (formules et contrôles)
@@ -97,6 +101,8 @@ metre-ba-agent/
 │   ├── surface_metre_excel.py     # Classeur surfaces (pièces / étages / second œuvre / audit échelle)
 │   ├── vision_bridge.py           # Routage hybride partagé CLI/UI, pont vers plan_data legacy
 │   ├── local_extractor.py         # Moteur vectoriel historique
+│   ├── bet_view_model.py          # Toutes les valeurs affichées par l'UI (aucun chiffre inventé)
+│   ├── history.py                 # Projets récents (<sortie>/.planba_history.json)
 │   ├── pipeline/                  # Pipeline zero-miss modulaire
 │   └── …                          # calculator, schemas, ocr_engine, validator, dxf/ifc…
 ├── extractors/
