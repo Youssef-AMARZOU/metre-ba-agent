@@ -2192,6 +2192,80 @@ class VectorPlanExtractor:
                 f"{'+'.join(str(b['nb']) + 'T' + str(b['phi']) for b in bars)}, "
                 f"{cadres_txt} — à vérifier sur plan.")
 
+    # ------------------------------------------------------------------
+    # D. Coherence des sections affichees (avant restitution UI / Excel)
+    # ------------------------------------------------------------------
+    #: Familles dont la section se lit en (b, h) = (largeur, hauteur).
+    _FAMILLES_BH = ("poutres", "longrines", "linteaux", "chainages",
+                    "consoles", "poutrelles")
+    #: Familles dont la section se lit en (a, b) dans le plan.
+    _FAMILLES_AB = ("semelles", "massifs", "radiers", "poteaux",
+                    "voiles", "murs", "dalles", "escaliers")
+
+    @staticmethod
+    def _dims_from_key(ref):
+        """Dimensions portees par la reference ('BN_25x30' -> (25, 30))."""
+        m = re.search(r"_(\d{2,3})x(\d{2,3})$", str(ref or "").upper())
+        if not m:
+            return None, None
+        return int(m.group(1)), int(m.group(2))
+
+    def _finalize_sections(self, cat):
+        """Derive ``section_str`` des qu'une section est reellement connue.
+
+        Regle de rigueur : on n'ecrit JAMAIS une section inventee. La chaine
+        ``section_str`` n'est produite que si les DEUX dimensions requises
+        sont lues sur le plan (ou portees par la reference).
+
+        * poutres / longrines / linteaux / chainages : ``b x h``
+        * semelles / massifs / radiers / poteaux : ``a x b``
+
+        Les elements restes incomplets sont signales dans ``hypotheses``
+        (statut NON_RESOLU), jamais completes par une valeur par defaut.
+        """
+        def cm(val):
+            try:
+                f = float(val)
+            except (TypeError, ValueError):
+                return None
+            return f * 100.0 if f > 0 else None
+
+        for fam, elems in (cat or {}).items():
+            if not isinstance(elems, dict):
+                continue
+            for ref, spec in elems.items():
+                if not isinstance(spec, dict):
+                    continue
+
+                # 1) Reference auto-porteuse : 'N1_25x40', 'BN_25x30', 'P1_25x35'
+                k_b, k_h = self._dims_from_key(ref)
+                if k_b is not None:
+                    if fam in self._FAMILLES_BH:
+                        spec.setdefault("b", k_b / 100.0)
+                        spec.setdefault("h", k_h / 100.0)
+                    else:
+                        spec.setdefault("a", k_b / 100.0)
+                        spec.setdefault("b", k_h / 100.0)
+
+                # 2) Derivation depuis les dimensions lues
+                if not spec.get("section_str"):
+                    if fam in self._FAMILLES_BH:
+                        b, h = cm(spec.get("b")), cm(spec.get("h"))
+                        if b and h:
+                            spec["section_str"] = f"{round(b)}x{round(h)}"
+                    else:
+                        a, b = cm(spec.get("a")), cm(spec.get("b"))
+                        if a and b:
+                            spec["section_str"] = f"{round(a)}x{round(b)}"
+
+                # 3) Section encore inconnue -> tracee, pas inventee
+                if not spec.get("section_str") and fam in (
+                        self._FAMILLES_BH + self._FAMILLES_AB):
+                    note = (f"{fam}/{ref}: section non cotee sur le plan "
+                            f"(NON_RESOLU) — a completer avant metre")
+                    if note not in self.hypotheses:
+                        self.hypotheses.append(note)
+
     def _merge_semelle(self, tk, spec):
         cur = self.global_catalogue["semelles"].setdefault(tk, {})
         for k, v in spec.items():
@@ -3027,6 +3101,9 @@ class VectorPlanExtractor:
                     logger.debug("Schedule parser error on page %d: %s", page_num, exc)
         except ImportError:
             pass
+
+        # --- COHERENCE DES SECTIONS (section_str derivee, jamais inventee) ---
+        self._finalize_sections(cat)
 
         # --- RAPPORT METIER (regles metier genie civil) ---
         metier_report = self._build_metier_report(cat)

@@ -29,6 +29,44 @@ COLORS = {
     "border": "#2a3a5a",
 }
 
+# Familles dont la section se lit en (b, h) = (largeur, hauteur)
+FAMILLES_BH = ("poutres", "longrines", "chainages", "linteaux")
+
+
+def section_label(spec: dict, cat_key: str) -> str:
+    """Section (cm) affichable, sans jamais inventer de dimension.
+
+    1. ``section_str`` si l'extracteur l'a produite ;
+    2. sinon derivee des dimensions reellement presentes
+       (``b x h`` pour les poutres, ``a x b`` pour les semelles/poteaux) ;
+    3. sinon ``"?"`` (valeur non cotee sur le plan).
+    """
+    sec = str(spec.get("section_str") or "").strip()
+    if sec:
+        return sec
+
+    def cm(val):
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            return None
+        return round(f * 100) if f > 0 else None
+
+    a, b, h = cm(spec.get("a")), cm(spec.get("b")), cm(spec.get("h"))
+    if cat_key in FAMILLES_BH:
+        return f"{b}x{h}" if (b and h) else "?"
+    return f"{a}x{b}" if (a and b) else "?"
+
+
+def _fmt_dim(raw) -> str:
+    """Formate une dimension en m pour la colonne editable."""
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, (int, float)):
+        return "" if float(raw) <= 0 else f"{float(raw):.3f}"
+    return str(raw)
+
+
 # Familles a afficher
 FAMILLES = [
     ("poteaux", "POTEAUX", "P"),
@@ -142,7 +180,10 @@ class CorrectionView(ctk.CTkToplevel):
         # En-tetes selon la famille
         headers = ["Reference", "Section (cm)", "a (m)", "b (m)"]
         if cat_key == "poutres":
-            headers.extend(["h (m)", "Longueur (m)"])
+            # Pour une poutre : b = largeur, h = hauteur, la portee n'est
+            # pas 'a'. On expose donc explicitement la portee.
+            headers = ["Reference", "Section (cm)", "b (m)", "h (m)",
+                       "Longueur (m)"]
         elif cat_key == "poteaux":
             headers.extend(["Hauteur (m)"])
         elif cat_key == "semelles":
@@ -200,22 +241,20 @@ class CorrectionView(ctk.CTkToplevel):
         # Peupler avec les donnees extraites
         for ref in sorted(elements.keys()):
             spec = elements[ref]
-            valeurs = {"Reference": ref, "Section (cm)": spec.get("section_str", "?")}
+            valeurs = {"Reference": ref,
+                       "Section (cm)": section_label(spec, cat_key)}
             # Remplir les dimensions
             dim_keys = [k for k in headers if k not in ("Reference", "Section (cm)", "Nombre")]
             for dk in dim_keys:
                 # Mapper le nom de colonne vers la cle du dict
                 key_map = {
                     "a (m)": "a", "b (m)": "b", "h (m)": "h",
-                    "Hauteur (m)": "hauteur_p", "Longueur (m)": "longueur",
+                    "Hauteur (m)": "hauteur", "Longueur (m)": "longueur",
                 }
                 raw = spec.get(key_map.get(dk, dk), "")
-                if isinstance(raw, float):
-                    valeurs[dk] = f"{raw:.3f}"
-                elif raw is None or raw == "":
-                    valeurs[dk] = ""
-                else:
-                    valeurs[dk] = str(raw)
+                if dk == "Hauteur (m)" and raw in (None, "", 0):
+                    raw = spec.get("hauteur_p", "")
+                valeurs[dk] = _fmt_dim(raw)
             valeurs["Nombre"] = str(spec.get("nombre", 1))
             valeurs["_ref"] = ref
             valeurs["_spec"] = spec
@@ -254,8 +293,8 @@ class CorrectionView(ctk.CTkToplevel):
             grid_frame, text="X", width=28, height=24,
             font=ctk.CTkFont(size=10),
             fg_color=COLORS["danger"], hover_color="#A71D2A",
-            command=lambda r=row_idx, w=widgets_ligne, re=ref: (
-                self._supprimer_ligne(grid_frame, lignes_widgets, entries, re, w, r)))
+            command=lambda r=row_idx, w=widgets_ligne, ref_=ref: (
+                self._supprimer_ligne(grid_frame, lignes_widgets, entries, ref_, w, r)))
         btn_del.grid(row=row_idx, column=len(headers), padx=4, pady=2)
 
         widgets_ligne["_del_btn"] = btn_del
@@ -292,7 +331,7 @@ class CorrectionView(ctk.CTkToplevel):
         # Mapping colonne -> cle du spec
         key_map = {
             "a (m)": "a", "b (m)": "b", "h (m)": "h",
-            "Hauteur (m)": "hauteur_p", "Longueur (m)": "longueur",
+            "Hauteur (m)": "hauteur", "Longueur (m)": "longueur",
         }
 
         for cat_key, entries in self.tables.items():
@@ -320,9 +359,13 @@ class CorrectionView(ctk.CTkToplevel):
                         pass
 
                 # Mettre a jour section_str si les dimensions ont change
-                a = spec.get("a", 0)
-                b = spec.get("b", 0)
-                if a > 0 and b > 0:
+                a = spec.get("a") or 0
+                b = spec.get("b") or 0
+                h = spec.get("h") or 0
+                if cat_key in FAMILLES_BH:
+                    if b > 0 and h > 0:
+                        spec["section_str"] = f"{b*100:.0f}x{h*100:.0f}"
+                elif a > 0 and b > 0:
                     spec["section_str"] = f"{a*100:.0f}x{b*100:.0f}"
 
                 # Utiliser la reference du champ Reference si modifiee

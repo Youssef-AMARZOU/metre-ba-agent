@@ -1924,8 +1924,31 @@ class PlanBAMetreApp(*_DND_BASES):
         output = get_output_dir()
         os.startfile(str(output))
 
+    #: Prefixe de repere -> famille catalogue (secours si le pipeline ne
+    #: renseigne pas `family_type`).
+    _PREFIX_FAMILY = (
+        ("BN", "murs"), ("CH", "chainages"), ("LG", "longrines"),
+        ("ESC", "escaliers"), ("DS", "dalles"), ("SB", "massifs"),
+        ("P", "poteaux"), ("S", "semelles"), ("N", "poutres"),
+        ("V", "voiles"), ("M", "murs"), ("D", "dalles"),
+    )
+
+    @classmethod
+    def _family_from_repere(cls, repere: str) -> str:
+        """Deduit la famille d'un repere ('BN1' -> murs, 'S2' -> semelles)."""
+        txt = str(repere or "").upper().strip()
+        for prefix, fam in cls._PREFIX_FAMILY:
+            if txt.startswith(prefix):
+                return fam
+        return ""
+
     def _merge_pipeline_results(self, plan_data: dict, report: dict):
-        """Fusionne les resultats du pipeline zero-miss dans catalogue_types."""
+        """Fusionne les resultats du pipeline zero-miss dans catalogue_types.
+
+        Garde-fous : seules les dimensions REELLES sont reportees. Les
+        valeurs sentinelles du pipeline ('--', '', None) sont ignorees, et
+        une famille absente est deduite du prefixe du repere.
+        """
         catalogue = plan_data.setdefault("catalogue_types", {})
 
         # Mapping famille pipeline -> cle catalogue
@@ -1951,7 +1974,7 @@ class PlanBAMetreApp(*_DND_BASES):
             family = inst.get("family_type", "")
             dims = inst.get("dimensions", {})
 
-            cat_key = FAMILY_MAP.get(family, "")
+            cat_key = FAMILY_MAP.get(family, "") or self._family_from_repere(repere)
             if not cat_key:
                 continue
 
@@ -1962,21 +1985,31 @@ class PlanBAMetreApp(*_DND_BASES):
 
             sec = dims.get("section")
             if isinstance(sec, dict):
-                sec_val = sec.get("value", "")
+                sec_val = str(sec.get("value", "") or "").strip()
             elif isinstance(sec, str):
-                sec_val = sec
+                sec_val = sec.strip()
+            if sec_val in ("--", "-", "?"):
+                sec_val = ""
 
             a_raw = dims.get("a")
             if isinstance(a_raw, dict):
                 a_val = a_raw.get("value")
             elif isinstance(a_raw, (int, float)):
                 a_val = a_raw
+            if not isinstance(a_val, (int, float)) or a_val <= 0:
+                a_val = None
 
             b_raw = dims.get("b")
             if isinstance(b_raw, dict):
                 b_val = b_raw.get("value")
             elif isinstance(b_raw, (int, float)):
                 b_val = b_raw
+            if not isinstance(b_val, (int, float)) or b_val <= 0:
+                b_val = None
+
+            # Aucune dimension exploitable -> rien a fusionner (zero invention)
+            if not (sec_val or a_val or b_val):
+                continue
 
             # Creer l'entree si elle n'existe pas
             cat = catalogue.setdefault(cat_key, {})
