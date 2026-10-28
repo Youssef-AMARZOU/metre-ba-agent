@@ -14,6 +14,7 @@ import re
 import sys
 import threading
 import time
+import tkinter as tk
 import traceback
 import webbrowser
 from pathlib import Path
@@ -46,6 +47,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # jamais en en-tete, pour que la fenetre s'affiche immediatement.
 from core.paths import get_output_dir
 
+# Systeme de design de la maquette (tokens + widgets sombres).
+from ui.design import font, mono
+
 # Drag & Drop natif Windows (tkdnd) — degrade gracieusement si absent :
 # l'application reste utilisable via "Parcourir" sans tkinterdnd2.
 try:
@@ -65,6 +69,7 @@ _DND_BASES = (ctk.CTk, TkinterDnD.DnDWrapper) if TKDND_AVAILABLE else (ctk.CTk,)
 
 APP_NAME = "PlanBA Pro"
 APP_TAGLINE = "Métré Béton Armé & Surfaces"
+APP_VERSION = "2.0.0"
 APP_TITLE = f"{APP_NAME} — {APP_TAGLINE}"
 APP_SUBTITLE = (
     "Plans BA (PDF, DXF, scans) et plans d'architecture (images) → métré "
@@ -145,56 +150,131 @@ class PlanBAEncoder(json.JSONEncoder):
         return str(obj)
 
 class DropZone(ctk.CTkFrame):
-    """Zone de dépôt de fichier avec sélection par bouton."""
+    """Zone de depot de plan au theme de la maquette.
+
+    Etats visuels (puces) : Vide -> Survol -> OK / Reserve / Erreur.
+    L'etat est pilote par la validation applicative, jamais devine ici.
+    """
+
+    STATES = [("vide", "Vide"), ("survol", "Survol"), ("ok", "OK"),
+              ("reserve", "Réserve"), ("erreur", "Erreur")]
 
     def __init__(self, master, on_file_selected=None, **kwargs):
+        from ui.design import T as TOKENS
+
+        kwargs.setdefault("height", 190)
         super().__init__(master, **kwargs)
         self.on_file_selected = on_file_selected
         self.file_path: Optional[str] = None
+        self._t = TOKENS
+        self.configure(fg_color="transparent")
 
-        self.configure(fg_color=COLORS["bg_card"], corner_radius=12,
-                       border_width=2, border_color=COLORS["primary"])
+        # Cadre pointille : 4 bandes fines superposees au cadre (un canvas
+        # plein cadre intercepterait les clics sur les boutons).
+        self.box = ctk.CTkFrame(self, fg_color=TOKENS["bg_input"],
+                                corner_radius=8)
+        self.box.pack(fill="both", expand=True)
+        self._border_color = "#5c5c5c"
+        self._edges: dict = {}
+        for name in ("top", "bottom", "left", "right"):
+            cv = tk.Canvas(self.box, bg=TOKENS["bg_input"], highlightthickness=0,
+                           bd=0, height=3)
+            self._edges[name] = cv
+        self.box.bind("<Configure>", lambda _e: self._layout_edges())
 
-        # Icône et texte
-        self.label_icon = ctk.CTkLabel(
-            self, text="📄", font=ctk.CTkFont(size=32))
-        self.label_icon.pack(pady=(12, 2))
+        self.label_icon = ctk.CTkLabel(self.box, text="⬆", font=font(20),
+                                       text_color=TOKENS["text_muted"])
+        self.label_icon.pack(pady=(22, 0))
 
         self.label_title = ctk.CTkLabel(
-            self, text="Déposez un plan ici",
-            font=ctk.CTkFont(size=16, weight="bold"))
-        self.label_title.pack(pady=(0, 2))
+            self.box, text="Glissez votre plan ici", font=font(12, "bold"),
+            text_color=TOKENS["text"])
+        self.label_title.pack(pady=(6, 0))
 
         self.label_subtitle = ctk.CTkLabel(
-            self, text="PDF, DXF, DWG, PNG, JPG, TIFF, BMP, WEBP",
-            font=ctk.CTkFont(size=11), text_color=COLORS["text_muted"])
-        self.label_subtitle.pack(pady=(0, 8))
+            self.box, text="PDF · DXF · DWG · PNG · JPG",
+            font=font(9), text_color=TOKENS["text_muted"])
+        self.label_subtitle.pack(pady=(2, 8))
 
-        # Bouton parcourir
         self.btn_browse = ctk.CTkButton(
-            self, text="Parcourir...",
-            font=ctk.CTkFont(size=12),
-            width=160, height=30,
-            fg_color=COLORS["primary"],
-            hover_color="#1F3A70",
+            self.box, text="Parcourir…", font=font(10), width=124, height=28,
+            corner_radius=5, fg_color=TOKENS["accent"],
+            hover_color=TOKENS["accent_dark"], text_color="#ffffff",
             command=self._browse_file)
-        self.btn_browse.pack(pady=(0, 8))
+        self.btn_browse.pack(pady=(0, 6))
 
-        # Label du fichier sélectionné
         self.label_file = ctk.CTkLabel(
-            self, text="Aucun fichier sélectionné",
-            font=ctk.CTkFont(size=11),
-            text_color=COLORS["text_muted"],
-            wraplength=500)
-        self.label_file.pack(pady=(0, 5))
+            self.box, text="Aucun fichier sélectionné", font=font(9),
+            text_color=TOKENS["text_muted"], wraplength=560)
+        self.label_file.pack()
 
-        # Label de statut de validation (pre-flight)
         self.label_validation = ctk.CTkLabel(
-            self, text="",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=COLORS["text_muted"],
-            wraplength=500)
-        self.label_validation.pack(pady=(0, 6))
+            self.box, text="", font=font(9, "bold"),
+            text_color=TOKENS["text_muted"], wraplength=560)
+        self.label_validation.pack(pady=(0, 10))
+
+        chips = ctk.CTkFrame(self, fg_color="transparent")
+        chips.pack(anchor="w", pady=(7, 0))
+        self._chips: dict = {}
+        for key, text in self.STATES:
+            chip = ctk.CTkLabel(chips, text=text, font=font(8, "bold"),
+                                corner_radius=3, padx=7, pady=1,
+                                fg_color=TOKENS["bg_card"],
+                                text_color=TOKENS["text_muted"])
+            chip.pack(side="left", padx=(0, 6))
+            self._chips[key] = chip
+        self._set_state("vide")
+
+    def _layout_edges(self):
+        """Aligne les 4 bandes sur les bords du cadre (rayon 8 px)."""
+        w = self.box.winfo_width()
+        h = self.box.winfo_height()
+        if w < 24 or h < 24:
+            return
+        r = 8
+        self._edges["top"].place(x=r, y=0, width=w - 2 * r, height=3)
+        self._edges["bottom"].place(x=r, y=h - 3, width=w - 2 * r, height=3)
+        self._edges["left"].place(x=0, y=r, width=3, height=h - 2 * r)
+        self._edges["right"].place(x=w - 3, y=r, width=3, height=h - 2 * r)
+        for cv in self._edges.values():
+            # Canvas.lift() est un alias de tag_raise (items) : on hisse le
+            # widget via Tcl pour qu'il passe au-dessus du fond du cadre.
+            cv.tk.call("raise", cv._w)
+        # Les largeurs ne sont connues qu'apres la pose : on redessine a vide.
+        self.after_idle(lambda: self._draw_border(self._border_color))
+
+    def _draw_border(self, color: str):
+        self._border_color = color
+        for name, cv in self._edges.items():
+            cv.delete("all")
+            w = cv.winfo_width()
+            h = cv.winfo_height()
+            if w < 4 or h < 1:
+                continue
+            if name in ("top", "bottom"):
+                cv.create_line(0, h / 2, w, h / 2, fill=color, dash=(4, 4))
+            else:
+                cv.create_line(w / 2, 0, w / 2, h, fill=color, dash=(4, 4))
+
+    # -------------------------------------------------------------- etats
+    def _set_state(self, key: str):
+        """Une seule puce active : l'etat reel de l'import."""
+        from ui.design import KIND_COLORS
+
+        kind = {"vide": "neutral", "survol": "info", "ok": "ok",
+                "reserve": "warn", "erreur": "err"}.get(key, "neutral")
+        fg, bg = KIND_COLORS[kind]
+        for name, chip in self._chips.items():
+            if name == key:
+                chip.configure(fg_color=bg, text_color=fg)
+            else:
+                chip.configure(fg_color=self._t["bg_card"],
+                               text_color=self._t["text_muted"])
+
+    def _highlight(self, on: bool):
+        """Retour visuel du survol (drag) : bord accent."""
+        self._border_color = self._t["accent"] if on else "#5c5c5c"
+        self._draw_border(self._border_color)
 
     def _browse_file(self):
         from tkinter import filedialog
@@ -223,33 +303,39 @@ class DropZone(ctk.CTkFrame):
         """Remet a zero le statut de validation avant un nouveau fichier."""
         self.label_file.configure(
             text="Aucun fichier sélectionné",
-            text_color=COLORS["text_muted"])
-        self.label_validation.configure(text="", text_color=COLORS["text_muted"])
-        self.label_icon.configure(text="📄")
-        self.label_title.configure(text="Déposez un plan ici")
+            text_color=self._t["text_muted"])
+        self.label_validation.configure(text="",
+                                        text_color=self._t["text_muted"])
+        self.label_icon.configure(text="⬆", text_color=self._t["text_muted"])
+        self.label_title.configure(text="Glissez un plan ici")
+        self._set_state("vide")
 
     def show_valid(self, name: str, size_kb: int, source_label: str,
                    message: str):
         """Fichier valide : label vert + verdict."""
+        t = self._t
         self.label_file.configure(
             text=f"✅ {name}  [{size_kb} Ko — {source_label}]",
-            text_color=COLORS["success"])
+            text_color=t["success"])
         self.label_validation.configure(
             text=f"✅ Plan technique validé — {message}",
-            text_color=COLORS["success"])
+            text_color=t["success"])
         self.label_title.configure(text="Fichier chargé")
-        self.label_icon.configure(text="✅")
+        self.label_icon.configure(text="✅", text_color=t["success"])
+        self._set_state("ok")
 
     def show_rejected(self, name: str, message: str):
         """Fichier rejeté : label rouge, jamais de vert trompeur."""
+        t = self._t
         self.label_file.configure(
             text=f"❌ {name}" if name else "❌ Document rejeté",
-            text_color=COLORS["danger"])
+            text_color=t["danger"])
         self.label_validation.configure(
             text=f"❌ Document rejeté : {message}",
-            text_color=COLORS["danger"])
+            text_color=t["danger"])
         self.label_title.configure(text="Document rejeté")
-        self.label_icon.configure(text="🚫")
+        self.label_icon.configure(text="🚫", text_color=t["danger"])
+        self._set_state("erreur")
 
 
 # ============================================================================
@@ -868,6 +954,239 @@ class RapportMetierPanel(ctk.CTkFrame):
 
 
 # ============================================================================
+# Parametres de calcul de la modale "Nouveau metre"
+# ============================================================================
+
+class AnalyseOptions(ctk.CTkFrame):
+    """Parametres de calcul compacts (theme de la maquette).
+
+    Meme contrat public que `OptionsPanel` : le worker d'analyse appelle
+    get_nom / get_mode / get_largeur_hors_tout / get_hsp / apply_vision_env
+    sans savoir quelle interface le porte.
+    """
+
+    MODES = OptionsPanel.MODES
+    VLM_CHOICES = OptionsPanel.VLM_CHOICES
+
+    def __init__(self, master, nom_getter=None, **kwargs):
+        from ui.design import T as TOKENS
+
+        kwargs.setdefault("fg_color", "transparent")
+        super().__init__(master, **kwargs)
+        t = TOKENS
+        self._t = t
+        self._nom_getter = nom_getter
+        self.grid_columnconfigure((0, 1), weight=1, uniform="opt")
+
+        def lbl(row, col, text):
+            ctk.CTkLabel(self, text=text, font=font(8, "bold"),
+                         text_color=t["text_muted"]).grid(
+                row=row, column=col, sticky="w",
+                padx=(2, 8) if col == 0 else (12, 0), pady=(0, 2))
+
+        def pad(col):
+            return (2, 8) if col == 0 else (12, 2)
+
+        lbl(0, 0, "MODE D'ANALYSE")
+        lbl(0, 1, "VISION IA (100 % GRATUIT, OPTIONNEL)")
+        self.mode_menu = ctk.CTkOptionMenu(
+            self, values=self.MODES, height=30, font=font(10),
+            fg_color=t["bg_input"], button_color=t["bg_hover"],
+            button_hover_color=t["border"], text_color=t["text"],
+            dropdown_fg_color=t["bg_card"], dropdown_text_color=t["text"],
+            corner_radius=4)
+        self.mode_menu.set(self.MODES[0])
+        self.mode_menu.grid(row=1, column=0, sticky="ew", padx=pad(0),
+                            pady=(0, 8))
+        self.vlm_menu = ctk.CTkOptionMenu(
+            self, values=self.VLM_CHOICES, height=30, font=font(10),
+            fg_color=t["bg_input"], button_color=t["bg_hover"],
+            button_hover_color=t["border"], text_color=t["text"],
+            dropdown_fg_color=t["bg_card"], dropdown_text_color=t["text"],
+            corner_radius=4, command=self._on_vlm_change)
+        self.vlm_menu.set(self.VLM_CHOICES[0])
+        self.vlm_menu.grid(row=1, column=1, sticky="ew", padx=pad(1),
+                           pady=(0, 8))
+
+        lbl(2, 0, "CLÉ GROQ (gsk_…) — JAMAIS ENVOYÉE AILLEURS")
+        lbl(2, 1, "LARGEUR HORS-TOUT (m) — CALIBRATION")
+        key_row = ctk.CTkFrame(self, fg_color="transparent")
+        key_row.grid(row=3, column=0, sticky="ew", padx=pad(0), pady=(0, 8))
+        key_row.grid_columnconfigure(0, weight=1)
+        self.entry_api_key = ctk.CTkEntry(
+            key_row, placeholder_text="gsk_…", height=30, show="*",
+            font=font(10), fg_color=t["bg_input"], border_color=t["border"],
+            corner_radius=4)
+        self.entry_api_key.grid(row=0, column=0, sticky="ew")
+        self.btn_toggle = ctk.CTkButton(
+            key_row, text="👁", width=32, height=30, corner_radius=4,
+            font=font(10), fg_color=t["bg_input"],
+            hover_color=t["bg_hover"], text_color=t["text_dim"],
+            command=self._toggle_visibility)
+        self.btn_toggle.grid(row=0, column=1, padx=(4, 0))
+        self._api_visible = False
+
+        self.entry_largeur = ctk.CTkEntry(
+            self, placeholder_text="Ex : 18.90 (vide = cotes du plan)",
+            height=30, font=font(10), fg_color=t["bg_input"],
+            border_color=t["border"], corner_radius=4)
+        self.entry_largeur.grid(row=3, column=1, sticky="ew", padx=pad(1),
+                                pady=(0, 8))
+
+        lbl(4, 0, "HAUTEUR SOUS PLAFOND (m) — ENDUITS")
+        self.entry_hsp = ctk.CTkEntry(
+            self, height=30, font=font(10), fg_color=t["bg_input"],
+            border_color=t["border"], corner_radius=4)
+        self.entry_hsp.insert(0, "2.80")
+        self.entry_hsp.grid(row=5, column=0, sticky="ew", padx=pad(0))
+
+        self._load_from_env()
+        self._on_vlm_change(self.vlm_menu.get())
+
+    # ------------------------------------------------------------ etats
+    def _toggle_visibility(self):
+        self._api_visible = not self._api_visible
+        self.entry_api_key.configure(show="" if self._api_visible else "*")
+        self.btn_toggle.configure(text="🙈" if self._api_visible else "👁")
+
+    def _on_vlm_change(self, choice):
+        groq = str(choice).startswith("Groq")
+        state = "normal" if groq else "disabled"
+        self.entry_api_key.configure(state=state)
+        self.btn_toggle.configure(state=state)
+
+    def _load_from_env(self):
+        """Cle Groq depuis l'environnement ou .env (jamais d'API payante)."""
+        api_key = os.environ.get("GROQ_API_KEY", "")
+        if not api_key:
+            env_path = BASE_DIR / ".env"
+            if env_path.exists():
+                try:
+                    with open(env_path, encoding="utf-8") as f:
+                        for line in f:
+                            if line.strip().startswith("GROQ_API_KEY="):
+                                api_key = line.split("=", 1)[1].strip().strip('"')
+                                break
+                except Exception:
+                    pass
+        if api_key:
+            self.entry_api_key.configure(state="normal")
+            self.entry_api_key.insert(0, api_key)
+            self.vlm_menu.set(self.VLM_CHOICES[2])
+            self._on_vlm_change(self.VLM_CHOICES[2])
+
+    # ----------------------------------------------------------- getters
+    @staticmethod
+    def _float_or_none(entry):
+        try:
+            v = float(entry.get().strip().replace(",", "."))
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    def get_nom(self):
+        if self._nom_getter is None:
+            return None
+        try:
+            return (self._nom_getter() or "").strip() or None
+        except Exception:
+            return None
+
+    def get_api_key(self):
+        try:
+            return self.entry_api_key.get().strip() or None
+        except Exception:
+            return None
+
+    def get_mode(self) -> str:
+        """'auto' | 'ba' | 'surfaces'"""
+        current = self.mode_menu.get()
+        idx = self.MODES.index(current) if current in self.MODES else 0
+        return ("auto", "ba", "surfaces")[idx]
+
+    def get_vlm_backend(self) -> str:
+        """'off' | 'ollama' | 'groq'"""
+        c = self.vlm_menu.get()
+        if c.startswith("Groq"):
+            return "groq"
+        if c.startswith("Ollama"):
+            return "ollama"
+        return "off"
+
+    def get_largeur_hors_tout(self):
+        return self._float_or_none(self.entry_largeur)
+
+    def get_hsp(self) -> float:
+        return self._float_or_none(self.entry_hsp) or 2.80
+
+    def apply_vision_env(self):
+        """Propage les choix freemium aux routeurs (variables d'env.)."""
+        os.environ["PLANBA_VLM_BACKEND"] = self.get_vlm_backend()
+        key = self.get_api_key()
+        if self.get_vlm_backend() == "groq" and key:
+            os.environ["GROQ_API_KEY"] = key
+
+
+# ============================================================================
+# Adaptateurs : le worker d'analyse (290 lignes, inchange) parle encore
+# aux anciens widgets. Ces objets absorbent ses appels sans rien casser.
+# ============================================================================
+
+class _Shim:
+    """Objet inerte : toute methode appelee devient un no-op."""
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+class _KpiShim:
+    """Le worker pousse ses totaux ; le workspace les recalcule lui-meme."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def update_values(self, plan_data=None, surfaces=None):
+        self.app._kpi_input = (plan_data, surfaces)
+
+
+class _SurfacesShim:
+    """Le tableau des surfaces vit dans le workspace (onglet SURFACES)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def clear(self):
+        self.app.surfaces_result = None
+
+    def update_from_result(self, surfaces):
+        self.app.surfaces_result = surfaces
+
+
+class _TabsShim:
+    """Redirige les onglets de l'ancienne UI vers les onglets du workspace."""
+
+    MAP = {
+        "📐  Surfaces": "SURFACES",
+        "SURFACES": "SURFACES",
+        "🧾  Livrables": "AUDIT",
+        "📊  Synthèse": "ÉLÉMENTS",
+        "📋  Journal": "JOURNAL",
+    }
+
+    def __init__(self, app):
+        self.app = app
+
+    def set(self, name):
+        target = self.MAP.get(name)
+        if not target:
+            return
+        try:
+            self.app.workspace.select_bottom(target)
+        except Exception:
+            pass
+
+
+# ============================================================================
 # Fenêtre principale
 # ============================================================================
 
@@ -948,7 +1267,7 @@ class PlanBAMetreApp(*_DND_BASES):
                 except Exception:
                     continue
 
-    def _build_ui(self):
+    def _build_ui_legacy(self):  # ancienne mise en page (conservee en reference)
         """Construit l'interface utilisateur."""
 
         self.configure(fg_color=COLORS["bg_dark"])
@@ -1222,6 +1541,10 @@ class PlanBAMetreApp(*_DND_BASES):
             self._log(f"⚠ Document rejeté ({score}/100) : {message}")
 
     def _log(self, msg: str):
+        try:
+            self._log_lines.append(msg)
+        except AttributeError:
+            pass
         self.log_text.insert("end", f"▸ {msg}\n")
         self.log_text.see("end")
         self.update_idletasks()
@@ -1238,6 +1561,11 @@ class PlanBAMetreApp(*_DND_BASES):
             return
 
         self.btn_action.configure(state="disabled", text="⏳ Analyse en cours...")
+        try:
+            self.progress_panel.reset()
+            self.progress_panel.grid()
+        except Exception:
+            pass
         self.btn_open_excel.configure(state="disabled")
         self.btn_open_folder.configure(state="disabled")
         for name in ("btn_open_surfaces", "btn_open_overlay", "btn_correct"):
@@ -1350,8 +1678,9 @@ class PlanBAMetreApp(*_DND_BASES):
                         f"Pipeline : {len(runner.store.instances)} instances, "
                         f"{sum(1 for i in runner.store.instances if i.dimensions)} avec dims"))
                 except Exception as e:
-                    self.after(0, lambda: self._log(
-                        f"Pipeline : erreur {e}"))
+                    msg = str(e)
+                    self.after(0, lambda m=msg: self._log(
+                        f"Pipeline : erreur {m}"))
 
                 # Couche Computer Vision hybride (scans / polices SHX)
                 try:
@@ -1430,6 +1759,7 @@ class PlanBAMetreApp(*_DND_BASES):
                     self.after(0, lambda s=surfaces: self._log(
                         "✅ Plan d'architecture : livrable = métré des surfaces\n"
                         f"   → {s['xlsx']}\n" + "".join(f"   → {o}\n" for o in s["overlays"])))
+                    self.after(0, lambda: self._on_analysis_done("surfaces"))
                     success = True
                     return
                 if mode == "surfaces":
@@ -1526,21 +1856,26 @@ class PlanBAMetreApp(*_DND_BASES):
                 f"   → {optim_xlsx}\n"
                 f"   → {rapport_pdf}\n"
                 f"   → {note_pdf}"))
+            self.after(0, lambda: self._on_analysis_done("ba"))
             success = True
 
         except Exception as e:
+            # `e` est efface a la sortie du bloc except : on fige les valeurs
+            # avant de planifier les callbacks (sinon NameError dans Tk).
             tb = traceback.format_exc()
-            self.after(0, lambda: self._log(
-                f"❌ Erreur ({type(e).__name__}) :\n{tb}"))
-            self.after(0, lambda message=str(e):
+            err_msg = str(e)
+            err_name = type(e).__name__
+            self.after(0, lambda n=err_name, t=tb: self._log(
+                f"❌ Erreur ({n}) :\n{t}"))
+            self.after(0, lambda message=err_msg:
                        self.progress_panel.set_step(
                            f"❌ Erreur : {message}", 0))
-            self.after(0, lambda message=str(e), details=tb:
+            self.after(0, lambda message=err_msg, details=tb:
                        self._show_error(
                            f"{message}\n\nDétails techniques :\n{details}"))
         finally:
             self.after(0, lambda: self.btn_action.configure(
-                state="normal", text="🚀  Lancer l'Analyse & Générer le Métré"))
+                state="normal", text="Lancer l'analyse  (Ctrl+Entrée)"))
             if not success:
                 self.after(0, lambda: self.btn_open_excel.configure(
                     state="disabled"))
@@ -1624,7 +1959,6 @@ class PlanBAMetreApp(*_DND_BASES):
             sec_val = ""
             a_val = None
             b_val = None
-            h_val = None
 
             sec = dims.get("section")
             if isinstance(sec, dict):
@@ -1729,8 +2063,9 @@ class PlanBAMetreApp(*_DND_BASES):
 
         except Exception as e:
             tb = traceback.format_exc()
-            self.after(0, lambda: self._log(
-                f"❌ Erreur regeneration : {e}\n{tb}"))
+            err_msg = str(e)
+            self.after(0, lambda m=err_msg, t=tb: self._log(
+                f"❌ Erreur regeneration : {m}\n{t}"))
         finally:
             self.after(0, lambda: self.btn_action.configure(
                 state="normal", text="🚀  Lancer l'Analyse & Generer le Metre"))
@@ -1739,6 +2074,369 @@ class PlanBAMetreApp(*_DND_BASES):
 # ============================================================================
 # Point d'entrée
 # ============================================================================
+
+    # ==================================================================
+    # Nouvelle interface (maquette Figma) : sidebar + accueil + workspace
+    # ==================================================================
+    def _build_ui(self):
+        from core.bet_view_model import build_view_model
+        from ui.design import T as TOKENS
+        from ui.home import HomeView
+        from ui.workspace import ResultsWorkspace
+
+        self._T = TOKENS
+        self._build_view_model = build_view_model
+        self._log_lines = []
+
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        self._build_sidebar()
+
+        content = ctk.CTkFrame(self, fg_color=TOKENS["bg"], corner_radius=0)
+        content.grid(row=0, column=1, sticky="nsew")
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(1, weight=1)
+
+        top = ctk.CTkFrame(content, fg_color=TOKENS["bg_panel"], height=36,
+                           corner_radius=0)
+        top.grid(row=0, column=0, sticky="ew")
+        top.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(top, text="PlanBA Pro — Métré Béton Armé & Surfaces",
+                     font=font(11, "bold"), text_color=TOKENS["text_dim"]).grid(
+            row=0, column=0, sticky="w", padx=14, pady=6)
+        self.lbl_top_etat = ctk.CTkLabel(
+            top, text="Prêt", font=font(10), text_color=TOKENS["text_muted"])
+        self.lbl_top_etat.grid(row=0, column=2, sticky="e", padx=14)
+
+        self.stack = ctk.CTkFrame(content, fg_color=TOKENS["bg"], corner_radius=0)
+        self.stack.grid(row=1, column=0, sticky="nsew")
+        self.stack.grid_columnconfigure(0, weight=1)
+        self.stack.grid_rowconfigure(0, weight=1)
+
+        self.home = HomeView(
+            self.stack, on_new=self._open_metre_modal,
+            on_open_plan=self._browse_plan,
+            on_open_project=self._open_project)
+        self.workspace = ResultsWorkspace(
+            self.stack, on_action=self._workspace_action)
+        self.home.grid(row=0, column=0, sticky="nsew")
+        self.workspace.grid(row=0, column=0, sticky="nsew")
+        self.workspace.grid_remove()
+
+        self._build_metre_modal()
+
+        # --- Alias de compatibilite avec le worker d'analyse -----------
+        self.btn_open_excel = self.workspace.actions["metre"]
+        self.btn_open_surfaces = self.workspace.actions["surfaces"]
+        self.btn_open_overlay = self.workspace.actions["overlay"]
+        self.btn_correct = self.workspace.actions["corriger"]
+        self.btn_open_folder = self.workspace.actions["dossier"]
+        self.log_text = self.workspace.tbl_journal
+        self.summary_table = _Shim()
+        self.rapport_metier = _Shim()
+        self.kpi_strip = _KpiShim(self)
+        self.surfaces_panel = _SurfacesShim(self)
+        self.tabs = _TabsShim(self)
+        self.options_panel = self.analyse_options
+
+    def _build_sidebar(self):
+        from ui.design import SidebarButton, T as TOKENS
+        bar = ctk.CTkFrame(self, fg_color="#101010", width=250, corner_radius=0,
+                           border_width=0)
+        bar.grid(row=0, column=0, sticky="nsw")
+        bar.grid_propagate(False)
+        bar.grid_rowconfigure(3, weight=1)
+
+        brand = ctk.CTkFrame(bar, fg_color="transparent")
+        brand.grid(row=0, column=0, sticky="ew", padx=16, pady=(18, 16))
+        ctk.CTkLabel(brand, text="PB", width=40, height=40,
+                     fg_color=TOKENS["accent_soft"], corner_radius=8,
+                     border_width=1, border_color=TOKENS["accent"],
+                     font=font(13, "bold"),
+                     text_color=TOKENS["accent"]).pack(anchor="w")
+        ctk.CTkLabel(brand, text="PlanBA Pro", font=font(19, "bold"),
+                     text_color=TOKENS["text"]).pack(anchor="w", pady=(10, 0))
+        ctk.CTkLabel(brand, text="Métré Béton Armé & Surfaces", font=font(9),
+                     text_color=TOKENS["text_muted"]).pack(anchor="w",
+                                                            pady=(2, 0))
+
+        SidebarButton(bar, "＋  Nouveau métré…", self._open_metre_modal,
+                      primary=True).grid(row=1, column=0, sticky="ew",
+                                         padx=16, pady=(0, 8))
+        SidebarButton(bar, "📁  Ouvrir un plan…", self._browse_plan).grid(
+            row=2, column=0, sticky="ew", padx=16)
+
+        spacer = ctk.CTkFrame(bar, fg_color="transparent")
+        spacer.grid(row=3, column=0, sticky="nsew")
+
+        local = ctk.CTkFrame(bar, fg_color="transparent")
+        local.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 10))
+        ctk.CTkLabel(local, text="🛡  100 % local", font=font(10, "bold"),
+                     text_color=TOKENS["success"]).pack(anchor="w")
+        ctk.CTkLabel(local, text="Aucun envoi sur internet",
+                     font=font(9), text_color=TOKENS["text_muted"]).pack(
+            anchor="w", pady=(1, 0))
+
+        SidebarButton(bar, "📁  Dossier de sortie", self._open_output_folder).grid(
+            row=5, column=0, sticky="ew", padx=16, pady=(0, 4))
+        ctk.CTkLabel(bar, text=f"v{APP_VERSION}  ·  BAEL 91 · RPS 2000 v2011",
+                     font=font(8), text_color="#6b6b6b").grid(
+            row=6, column=0, sticky="w", padx=16, pady=(0, 12))
+
+    def _build_metre_modal(self):
+        from ui.design import Badge, Banner, T as TOKENS
+
+        self.modal = ctk.CTkFrame(self, fg_color="#0b0b0b", corner_radius=0)
+        self.modal.grid_columnconfigure(0, weight=1)
+        self.modal.grid_rowconfigure(0, weight=1)
+
+        card = ctk.CTkFrame(self.modal, fg_color=TOKENS["bg_panel"],
+                            corner_radius=10, border_width=1,
+                            border_color=TOKENS["border_strong"], width=860)
+        card.grid(row=0, column=0)
+        card.grid_columnconfigure(0, weight=1, minsize=640)
+
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 10))
+        head.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(head, text="Nouveau métré", font=font(14, "bold"),
+                     text_color=TOKENS["text"]).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(head, text="✕", width=26, height=26, corner_radius=4,
+                      fg_color="transparent", hover_color=TOKENS["bg_hover"],
+                      text_color=TOKENS["text_dim"],
+                      command=self._close_metre_modal).grid(row=0, column=1,
+                                                            sticky="e")
+
+        ctk.CTkFrame(card, height=1, fg_color=TOKENS["border"]).grid(
+            row=1, column=0, sticky="ew")
+
+        self.drop_zone = DropZone(card, height=190,
+                                  on_file_selected=self._on_file_selected)
+        self.drop_zone.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 6))
+
+        self.modal_banner = Banner(card, "", "ok")
+        self.modal_banner.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self.modal_banner.grid_remove()
+
+        fields = ctk.CTkFrame(card, fg_color="transparent")
+        fields.grid(row=4, column=0, sticky="ew", padx=16)
+        fields.grid_columnconfigure((0, 1), weight=1, uniform="f")
+        ctk.CTkLabel(fields, text="Nom du projet", font=font(9),
+                     text_color=TOKENS["text_muted"]).grid(row=0, column=0,
+                                                           sticky="w")
+        self.entry_nom = ctk.CTkEntry(
+            fields, placeholder_text="Ex : Villa R+2 — Fondations", height=32,
+            font=font(11), fg_color=TOKENS["bg_input"],
+            border_color=TOKENS["border"])
+        self.entry_nom.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(2, 8))
+
+        ctk.CTkLabel(fields, text="Dossier de sortie", font=font(9),
+                     text_color=TOKENS["text_muted"]).grid(row=0, column=1,
+                                                           sticky="w")
+        dossier = ctk.CTkFrame(fields, fg_color="transparent")
+        dossier.grid(row=1, column=1, sticky="ew", pady=(2, 8))
+        dossier.grid_columnconfigure(0, weight=1)
+        self.entry_dossier = ctk.CTkEntry(
+            dossier, height=32, font=font(10), fg_color=TOKENS["bg_input"],
+            border_color=TOKENS["border"])
+        self.entry_dossier.grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(dossier, text="📁", width=34, height=32, corner_radius=4,
+                      fg_color=TOKENS["bg_input"], hover_color=TOKENS["bg_hover"],
+                      text_color=TOKENS["text_dim"],
+                      command=self._open_output_folder).grid(row=0, column=1,
+                                                             padx=(4, 0))
+
+        # --- Parametres de calcul (repliables) ------------------------
+        self.btn_params = ctk.CTkButton(
+            card, text="▸  Paramètres de calcul", anchor="w", height=32,
+            corner_radius=5, font=font(11),
+            fg_color=TOKENS["bg_card"], hover_color=TOKENS["bg_hover"],
+            border_width=1, border_color=TOKENS["border"],
+            text_color=TOKENS["text_dim"], command=self._toggle_params)
+        self.btn_params.grid(row=5, column=0, sticky="ew", padx=16)
+
+        self.params_host = ctk.CTkFrame(card, fg_color=TOKENS["bg_card"],
+                                        corner_radius=5, border_width=1,
+                                        border_color=TOKENS["border"])
+        self.analyse_options = AnalyseOptions(
+            self.params_host, nom_getter=lambda: self.entry_nom.get())
+        self.analyse_options.pack(fill="x", padx=6, pady=6)
+        self._params_open = False
+
+        # --- Pied de modale -----------------------------------------
+        ctk.CTkFrame(card, height=1, fg_color=TOKENS["border"]).grid(
+            row=7, column=0, sticky="ew", pady=(10, 0))
+        foot = ctk.CTkFrame(card, fg_color="transparent")
+        foot.grid(row=8, column=0, sticky="ew", padx=16, pady=(10, 12))
+        foot.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(foot, text="🛡  100 % local · aucune API",
+                     font=font(9), text_color=TOKENS["text_muted"]).grid(
+            row=0, column=0, sticky="w")
+        ctk.CTkButton(foot, text="Annuler", height=32, width=90, corner_radius=4,
+                      font=font(11), fg_color=TOKENS["bg_input"],
+                      hover_color=TOKENS["bg_hover"], text_color=TOKENS["text_dim"],
+                      command=self._close_metre_modal).grid(row=0, column=2,
+                                                            padx=(0, 6))
+        self.btn_action = ctk.CTkButton(
+            foot, text="Lancer l'analyse  (Ctrl+Entrée)", height=32, width=200,
+            corner_radius=4, font=font(11, "bold"), state="disabled",
+            fg_color=TOKENS["accent"], hover_color=TOKENS["accent_dark"],
+            text_color_disabled="#6d7f96", command=self._run_analysis)
+        self.btn_action.grid(row=0, column=3)
+
+        # Progression : ligne dediee, masquee tant qu'aucune analyse ne tourne
+        self.progress_panel = ProgressPanel(foot)
+        self.progress_panel.grid(row=1, column=0, columnspan=4, sticky="ew",
+                                 pady=(8, 0))
+        self.progress_panel.grid_remove()
+
+        self.bind("<Control-Return>", lambda _e: self._run_analysis())
+        self.modal.bind("<Escape>", lambda _e: self._close_metre_modal())
+
+    def _toggle_params(self):
+        self._params_open = not self._params_open
+        if self._params_open:
+            self.params_host.grid(row=6, column=0, sticky="ew", padx=16,
+                                  pady=(6, 0))
+            self.btn_params.configure(text="▾  Paramètres de calcul")
+        else:
+            self.params_host.grid_remove()
+            self.btn_params.configure(text="▸  Paramètres de calcul")
+
+    def _open_metre_modal(self):
+        from core.paths import get_output_dir
+        try:
+            self.entry_dossier.delete(0, "end")
+            self.entry_dossier.insert(0, str(get_output_dir()))
+        except Exception:
+            pass
+        self.modal.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.modal.lift()
+        try:
+            self.drop_zone.label_title.focus_set()
+        except Exception:
+            pass
+
+    def _close_metre_modal(self):
+        self.modal.place_forget()
+
+    def _browse_plan(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Ouvrir un plan",
+            filetypes=[("Plans et images",
+                        "*.pdf *.dxf *.dwg *.png *.jpg *.jpeg *.tif *.tiff "
+                        "*.bmp *.webp"),
+                       ("Tous les fichiers", "*.*")])
+        if path:
+            self._open_metre_modal()
+            self.drop_zone.set_file(path)
+
+    def _show_home(self):
+        self.workspace.grid_remove()
+        self.home.grid(row=0, column=0, sticky="nsew")
+        self.home.refresh()
+        self.lbl_top_etat.configure(text="Prêt")
+
+    def _show_workspace(self):
+        self.home.grid_remove()
+        self._close_metre_modal()
+        self.workspace.grid(row=0, column=0, sticky="nsew")
+        self.lbl_top_etat.configure(text="Analyse terminée")
+
+    def _workspace_action(self, key: str):
+        {"metre": self._open_excel,
+         "surfaces": self._open_surfaces_excel,
+         "overlay": self._open_overlay,
+         "corriger": self._open_correction,
+         "dossier": self._open_output_folder}.get(key, lambda: None)()
+
+    def _refresh_workspace(self, plan_data=None, surfaces=None,
+                           duree_s: float = 0.0):
+        plan_data = plan_data if plan_data is not None else self.plan_data
+        surfaces = surfaces if surfaces is not None else getattr(
+            self, "surfaces_result", None)
+        projet = ""
+        try:
+            nom_saisi = self.entry_nom.get().strip()
+        except Exception:
+            nom_saisi = ""
+        if nom_saisi:
+            projet = nom_saisi
+        else:
+            try:
+                projet = plan_data.get("projet", {})
+                projet = projet.get("nom") if isinstance(projet, dict) else projet
+            except Exception:
+                projet = ""
+        projet = projet or "Projet"
+        vm = self._build_view_model(plan_data, surfaces, projet)
+        self.workspace.show_results(
+            plan_data, surfaces, projet=projet,
+            fichier=getattr(self, "selected_file_path", "") or "",
+            duree_s=duree_s, log_text="\n".join(self._log_lines), vm=vm)
+        self._show_workspace()
+
+    def _on_analysis_done(self, mode: str = "ba"):
+        """Fin d'analyse : historique local + bascule sur les resultats."""
+        from core.history import add_entry
+        from core.paths import get_output_dir
+
+        self._refresh_workspace()
+        vm = self.workspace.vm
+        tot = vm.get("totaux", {})
+        chute = 0.0
+        stocks = vm.get("stocks") or {}
+        if stocks:
+            achat = sum(v.get("purchased_length_m", 0.0) for v in stocks.values())
+            perdu = sum(v.get("waste_length_m", 0.0) for v in stocks.values())
+            chute = round(perdu / achat * 100, 1) if achat else 0.0
+        statut = "À vérifier" if vm.get("anomalies") else "Terminé"
+        nom = (self.entry_nom.get().strip()
+               or (vm.get("meta", {}).get("projet") or "Projet"))
+        try:
+            add_entry(
+                nom, getattr(self, "selected_file_path", ""),
+                type_analyse=mode, beton=tot.get("beton_arme", 0.0),
+                acier=tot.get("acier", 0.0), chute=chute, statut=statut,
+                dossier=str(get_output_dir()),
+                surfaces=vm.get("surfaces", {}).get("total", 0.0),
+                alertes=len(vm.get("anomalies", [])))
+        except Exception:
+            pass
+        self.home.refresh()
+        for key in ("metre", "surfaces", "overlay", "corriger", "dossier"):
+            self.workspace.set_action_state(key, True)
+
+    def _open_project(self, entry: dict):
+        import json
+        from core.paths import get_output_dir
+        dossier = Path(entry.get("dossier") or get_output_dir())
+        plan_json = dossier / "plan_data.json"
+        if not plan_json.exists():
+            from tkinter import messagebox
+            messagebox.showinfo(
+                "Projet indisponible",
+                f"Aucune donnée retrouvée dans :\n{dossier}\n\n"
+                "Relancez l'analyse du plan.")
+            return
+        try:
+            with open(plan_json, encoding="utf-8") as f:
+                self.plan_data = json.load(f)
+        except Exception as exc:
+            from tkinter import messagebox
+            messagebox.showerror("Lecture impossible", str(exc))
+            return
+        self.selected_file_path = entry.get("chemin_source") or entry.get(
+            "fichier", "")
+        try:
+            self.entry_nom.delete(0, "end")
+            self.entry_nom.insert(0, entry.get("nom", ""))
+        except Exception:
+            pass
+        self._refresh_workspace()
+
 
 def launch_app():
     """Lance l'application Desktop.

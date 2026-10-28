@@ -28,6 +28,8 @@ reference/
 # --- Sorties générées : sous-dossiers ignorés ---
 # (les fichiers racine historiques output/*.xlsx|json|pdf restent suivis)
 output/*/
+# Etat local de l'application (projets recents, preferences)
+output/.planba_history.json
 
 # --- Environnements & caches Python ---
 .venv/
