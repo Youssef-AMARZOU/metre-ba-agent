@@ -15,15 +15,81 @@ from typing import Any, Callable, Dict, List, Optional
 
 import customtkinter as ctk
 
-from core.history import load_history
+from core.history import load_history, remove_entry
 from ui.design import Badge, Card, T, font
+
+
+class ConfirmDialog(ctk.CTkToplevel):
+    """Confirmation modale (style sombre de l'application).
+
+    ``run()`` bloque jusqu'a la reponse et retourne True/False.
+    """
+
+    def __init__(self, master, titre: str, message: str,
+                 ok_text: str = "Supprimer", danger: bool = True):
+        super().__init__(master)
+        self.result = False
+        self.title(titre)
+        self.configure(fg_color=T["bg_card"])
+        self.resizable(False, False)
+        self.transient(master.winfo_toplevel())
+
+        box = ctk.CTkFrame(self, fg_color="transparent")
+        box.pack(fill="both", expand=True, padx=22, pady=18)
+        ctk.CTkLabel(box, text=titre, font=font(14, "bold"),
+                     text_color=T["text"], anchor="w").pack(anchor="w")
+        ctk.CTkLabel(box, text=message, font=font(10), justify="left",
+                     text_color=T["text_muted"], wraplength=340,
+                     anchor="w").pack(anchor="w", pady=(8, 16))
+
+        actions = ctk.CTkFrame(box, fg_color="transparent")
+        actions.pack(anchor="e")
+        ctk.CTkButton(
+            actions, text="Annuler", font=font(10), height=30, width=96,
+            corner_radius=5, fg_color=T["bg_input"], hover_color=T["bg_hover"],
+            border_width=1, border_color=T["border"], text_color=T["text"],
+            command=self._cancel).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            actions, text=ok_text, font=font(10, "bold"), height=30, width=110,
+            corner_radius=5,
+            fg_color=T["danger"] if danger else T["accent"],
+            hover_color=T["danger"] if danger else T["accent_dark"],
+            command=self._ok).pack(side="left")
+
+        self.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self._center(master)
+        self.grab_set()
+        self.after(60, self.focus_force)
+
+    def _center(self, master):
+        self.update_idletasks()
+        top = master.winfo_toplevel()
+        x = top.winfo_rootx() + (top.winfo_width() - self.winfo_width()) // 2
+        y = top.winfo_rooty() + (top.winfo_height() - self.winfo_height()) // 3
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _ok(self):
+        self.result = True
+        self.destroy()
+
+    def _cancel(self):
+        self.result = False
+        self.destroy()
+
+    def run(self) -> bool:
+        self.wait_window(self)
+        return self.result
 
 
 class ProjectCard(Card):
     """Carte projet : aperçu, statut, nom, source, KPI, action."""
 
     def __init__(self, master, entry: Dict[str, Any],
-                 on_open: Callable[[Dict[str, Any]], None], **kwargs):
+                 on_open: Callable[[Dict[str, Any]], None],
+                 on_delete: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 **kwargs):
         super().__init__(master, **kwargs)
         self.entry = entry
         self.grid_columnconfigure(0, weight=1)
@@ -72,11 +138,20 @@ class ProjectCard(Card):
                          text_color=T["text_muted"]).pack(anchor="w", padx=7,
                                                           pady=(0, 4))
 
+        actions = ctk.CTkFrame(self, fg_color="transparent")
+        actions.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
         ctk.CTkButton(
-            self, text="Ouvrir", font=font(10, "bold"), height=26, width=90,
+            actions, text="Ouvrir", font=font(10, "bold"), height=26, width=90,
             corner_radius=4, fg_color=T["accent"], hover_color=T["accent_dark"],
-            command=lambda: on_open(self.entry)).grid(
-            row=4, column=0, sticky="w", padx=12, pady=(0, 10))
+            command=lambda: on_open(self.entry)).pack(side="left")
+        if on_delete is not None:
+            self.btn_delete = ctk.CTkButton(
+                actions, text="🗑  Supprimer", font=font(10), height=26,
+                width=110, corner_radius=4, fg_color="transparent",
+                hover_color=T["danger_soft"], border_width=1,
+                border_color=T["border"], text_color=T["danger"],
+                command=lambda: on_delete(self.entry))
+            self.btn_delete.pack(side="right")
 
     def _draw_grid(self, canvas: tk.Canvas):
         canvas.delete("all")
@@ -101,10 +176,12 @@ class HomeView(ctk.CTkFrame):
 
     def __init__(self, master, on_new: Callable[[], None],
                  on_open_plan: Callable[[], None],
-                 on_open_project: Callable[[Dict[str, Any]], None], **kwargs):
+                 on_open_project: Callable[[Dict[str, Any]], None],
+                 on_changed: Optional[Callable[[], None]] = None, **kwargs):
         kwargs.setdefault("fg_color", T["bg"])
         super().__init__(master, **kwargs)
         self.on_open_project = on_open_project
+        self.on_changed = on_changed
         self._entries: List[Dict[str, Any]] = []
         self._build(on_new, on_open_plan)
         self.refresh()
@@ -217,6 +294,41 @@ class HomeView(ctk.CTkFrame):
 
         cols = self._cols
         for idx, entry in enumerate(entries):
-            card = ProjectCard(self.scroll, entry, self.on_open_project)
+            card = ProjectCard(self.scroll, entry, self.on_open_project,
+                               on_delete=self._delete_entry)
             card.grid(row=idx // cols, column=idx % cols, sticky="nsew",
                       padx=8, pady=8, ipadx=0)
+
+    # ------------------------------------------------------------------
+    def _delete_entry(self, entry: Dict[str, Any]):
+        """Supprime un projet : confirmation, historique, instantane, puis
+        rafraichissement de la grille et du compteur « Mes plans »."""
+        nom = str(entry.get("nom") or "ce projet")
+        fichier = str(entry.get("fichier") or "")
+        message = (f"« {nom} »\n{fichier}\n\n" if fichier
+                   else f"« {nom} »\n\n")
+        message += ("Le projet sera retiré de la liste « Mes plans » et son "
+                    "instantané supprimé. Les fichiers déjà exportés dans le "
+                    "dossier de sortie sont conservés.")
+        try:
+            dialog = ConfirmDialog(self, "Supprimer le projet", message)
+            if not dialog.run():
+                return
+        except Exception:
+            from tkinter import messagebox
+            if not messagebox.askyesno("Supprimer le projet", message):
+                return
+        removed = remove_entry(str(entry.get("id") or ""))
+        self.refresh()
+        if self.on_changed is not None:
+            self.on_changed()
+        self._toast("Projet supprimé" if removed
+                    else "Projet introuvable dans l'historique")
+
+    def _toast(self, texte: str):
+        try:
+            top = self.winfo_toplevel()
+            if hasattr(top, "lbl_top_etat"):
+                top.lbl_top_etat.configure(text=texte)
+        except Exception:
+            pass

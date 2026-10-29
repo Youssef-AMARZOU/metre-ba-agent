@@ -124,6 +124,28 @@ def _write_snapshot(entry_id: str, plan_data: Optional[Dict[str, Any]],
         return ""
 
 
-def remove_entry(entry_id: str, output_dir: Optional[Path] = None) -> None:
-    entries = [e for e in load_history(output_dir) if e.get("id") != entry_id]
-    save_history(entries, output_dir)
+def remove_entry(entry_id: str, output_dir: Optional[Path] = None,
+                 delete_files: bool = True) -> bool:
+    """Supprime une fiche projet de l'historique.
+
+    ``delete_files`` supprime aussi l'instantane du projet
+    (``<sortie>/projets/<id>/``). Le dossier de sortie de l'analyse
+    (``dossier``) n'est JAMAIS supprime : il peut contenir les livrables
+    partages de plusieurs projets.
+
+    Retourne True si la fiche existait.
+    """
+    entries = load_history(output_dir)
+    gardees = [e for e in entries if e.get("id") != entry_id]
+    if len(gardees) == len(entries):
+        return False
+    save_history(gardees, output_dir)
+    if delete_files:
+        try:
+            import shutil
+            dossier = _history_path(output_dir).parent / "projets" / entry_id
+            if dossier.is_dir():
+                shutil.rmtree(dossier, ignore_errors=True)
+        except Exception:
+            pass
+    return True

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ui/desktop_app.py — Interface Desktop moderne pour Métré BA Agent.
@@ -69,7 +69,7 @@ _DND_BASES = (ctk.CTk, TkinterDnD.DnDWrapper) if TKDND_AVAILABLE else (ctk.CTk,)
 
 APP_NAME = "PlanBA Pro"
 APP_TAGLINE = "Métré Béton Armé & Surfaces"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 APP_TITLE = f"{APP_NAME} — {APP_TAGLINE}"
 APP_SUBTITLE = (
     "Plans BA (PDF, DXF, scans) et plans d'architecture (images) → métré "
@@ -2150,7 +2150,8 @@ class PlanBAMetreApp(*_DND_BASES):
         self.home = HomeView(
             self.stack, on_new=self._open_metre_modal,
             on_open_plan=self._browse_plan,
-            on_open_project=self._open_project)
+            on_open_project=self._open_project,
+            on_changed=self._refresh_plans_button)
         self.workspace = ResultsWorkspace(
             self.stack, on_action=self._workspace_action)
         self.home.grid(row=0, column=0, sticky="nsew")
