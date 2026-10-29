@@ -28,11 +28,34 @@ Règles de sécurité :
 * Deux cotes hors-tout très proches mais différentes (ratio ≥ 0,55, écart
   > 3 %) sur la même ligne → `[ALERTE ECHELLE] cotes hors-tout
   contradictoires` : l'ingénieur doit saisir la dimension réelle.
-* Les axes X et Y sont contrôlés séparément (scan déformé) ; l'axe le mieux
-  soutenu par les chaînes est retenu et la confiance est abaissée.
+* **Agrégation axe par axe** : les échelles X et Y sont calculées
+  séparément puis comparées.
+  * Écart ≤ 15 % → moyenne des deux axes (médiane des estimations
+    concordantes), confiance 0,90–0,92.
+  * Écart > 15 % → **aucune moyenne** (elle inventerait une échelle fausse) :
+    l'axe le **mieux coté** est retenu, confiance 0,55, alerte
+    `[ALERTE ECHELLE] axes X et Y incohérents`.
+    Cas typique : un plan basse résolution où l'axe Y ne porte qu'une cote de
+    chaîne (`15'-0"`) — la prendre pour un hors-tout donnait 60,6 px/m au lieu
+    de 12,0, soit +204 % d'échelle et +89 % de surface.
+  * Un seul axe coté → échelle acceptée, confiance 0,60, alerte
+    « une seule cote hors-tout exploitable ».
+* **Hors-tout = plus grande cote de son axe** : aucune cote de chaîne ne peut
+  dépasser la dimension totale ; si la plus grande cote contredit la médiane
+  des chaînes (> 25 %), la plus grande cote *cohérente* est retenue.
 
 Toutes les estimations restent visibles dans `SurfaceReport.scale_estimates`
 (méthode, valeur, cotes utilisées) — rien n'est silencieux.
+
+## 1 bis. Préparation de l'image
+
+Deux défauts de scan rendaient le calcul faux sans le dire ; ils sont
+détectés et corrigés avant toute mesure, avec une alerte tracée :
+
+| Défaut | Détection | Correction |
+| :--- | :--- | :--- |
+| **Scan inversé** (tirage bleu, négatif, photocopie foncée) | médiane de luminance < 110 | inversion de l'image (`bitwise_not`) — sinon tout le papier est pris pour du mur |
+| **Bruit de scan** (sel et poivre, poussière) | part de pixels sombres isolés > 2 % | filtre médian 3×3 (deux passes au-delà de 15 %) — sinon l'OCR perd `192'-0"` et lit une cote de chaîne à sa place (échelle ×3) |
 
 ## 2. Libellés de pièces
 
@@ -80,5 +103,38 @@ pieds/pouces `192'-0"` × `75'-0"`, échelle vraie 21,19 px/m) :
 | Deux pièces séparées par une porte | mesurées séparément, aucune `ZONE OUVERTE` |
 | Plan sans cote | `NON TROUVEE`, aucune surface inventée |
 
+### 4 bis. Matrice de robustesse (plan de référence 192'-0" × 75'-0")
+
+Le plan de référence est dégradé de 19 façons réalistes ; on compare l'échelle
+retrouvée et la surface de chacune des 10 pièces à la vérité terrain.
+
+| Variante | Erreur d'échelle | Erreur surface moyenne | Pièces mesurées |
+| :--- | ---: | ---: | ---: |
+| référence | +0,4 % | 1,8 % | 10/10 |
+| rotation 1° / 3° | +1,1 % / +1,5 % | 3,3 % / 4,0 % | 10/10 |
+| cisaillement 2° | +1,1 % | 3,2 % | 10/10 |
+| perspective 2,5 % / 5 % | −3,6 % / −7,4 % | 1,7 % / 2,2 % | 10/10 |
+| JPEG q50 / q20 | +0,7 % / +0,5 % | 2,4 % / 1,9 % | 10/10 |
+| 2000 / 1500 / 900 px de large | +0,8 % / +0,2 % / +0,8 % | 2,7 % / 1,8 % / 2,6 % | 10/10 |
+| agrandissement 4000 px | +0,7 % | 2,3 % | 10/10 |
+| bruit gaussien | +0,4 % | 1,9 % | 10/10 |
+| sel et poivre 0,5 % | +0,9 % | 2,9 % | 10/10 |
+| flou léger | +1,1 % | 3,1 % | 10/10 |
+| scan inversé | +0,4 % | 1,8 % | 10/10 |
+| papier bleu | +0,4 % | 1,8 % | 10/10 |
+| cotes métriques | +0,1 % | 1,1 % | 10/10 |
+| mobilier dense | +0,3 % | 1,5 % | **9/10** |
+| **sans aucune cote** | non calibrable | — | **0/10 (refus explicite)** |
+
+Limites connues (mesurées, non corrigées) :
+
+* **Mobilier qui traverse un libellé** : l'OCR peut perdre ce libellé (1 pièce
+  sur 10 dans le test). Aucune surface n'est inventée pour les autres.
+* **Plan sans cote ni échelle** : l'application refuse de mesurer et le dit ;
+  utiliser la saisie manuelle largeur/hauteur hors-tout.
+* **Croquis à main levée, photo en biais forte (> 5 %), plan en perspective
+  marquée** : hors du domaine mesuré.
+* **DXF/IFC** : non couverts par ce module.
+
 Tests automatisés : `tests/test_surface_metre.py`,
-`tests/test_surfaces_rooms.py`.
+`tests/test_surfaces_rooms.py` (12 tests).

@@ -310,6 +310,24 @@ class PlanSurfaceExtractor:
             H, W = img_bgr.shape[:2]
         rep = SurfaceReport(page_num=page_num, image_shape=(H, W))
 
+        # Scan inversé (tirage bleu, fond sombre) : les murs sont CLAIRS sur
+        # fond foncé. On inverse l'image, sinon le seuillage detecte le papier
+        # comme « mur » et plus aucune piece n'est mesuree.
+        img_bgr, inverted = self._normalize_polarity(img_bgr)
+        if inverted:
+            rep.warnings.append(
+                "Scan inversé (fond sombre / tirage bleu) : image inversée "
+                "avant analyse.")
+
+        # Poussiere / bruit de scan (speckle) : isole les cotes et les libelles
+        # de leurs voisins, l'OCR ne lit alors plus « 192'-0" » et une cote de
+        # chaine prend sa place (erreur d'echelle x3 constatee).
+        img_bgr, speckle = self._denoise_speckle(img_bgr)
+        if speckle > 0.02:
+            rep.warnings.append(
+                f"Bruit de scan (speckle {speckle*100:.1f} % de pixels isolés) : "
+                "image débruitée avant analyse.")
+
         if ocr_items is None:
             ocr_items = self.ocr.recognize(img_bgr) if self.ocr.available else []
             rep.ocr_engine = self.ocr.engine_name
@@ -395,6 +413,60 @@ class PlanSurfaceExtractor:
                              for i in range(1, n)) >= 0.25:
                 break
         return walls
+
+    @staticmethod
+    def _normalize_polarity(img_bgr):
+        """Inverse l'image si le fond est sombre (scan negatif, tirage bleu).
+
+        Un plan ordinaire a un fond papier clair (mediane > 110). Un tirage
+        inverse (murs clairs sur fond bleu/noir, calque de nuit, photocopie
+        negative) a une mediane basse : sans inversion, le seuillage Otsu
+        prend tout le papier pour du mur et plus aucune piece n'est mesuree.
+
+        Retourne ``(image, inverse)``.
+        """
+        import cv2
+        import numpy as np
+        if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
+            return img_bgr, False
+        gray = (cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+                if getattr(img_bgr, "ndim", 2) == 3 else img_bgr)
+        med = float(np.median(gray))
+        if med >= 110.0:
+            return img_bgr, False
+        return cv2.bitwise_not(img_bgr), True
+
+    @staticmethod
+    def _denoise_speckle(img_bgr):
+        """Debruite les scans poussiereux (bruit « sel et poivre »).
+
+        Mesure la part de pixels sombres isoles (aucun voisin sombre) : un
+        plan propre en a ~0 %, un scan poussiereux plusieurs pourcents. Au
+        dela de 2 %, un filtre median 3x3 est applique (deux passes si le
+        bruit depasse 15 %). Les traits et les textes, epais de plusieurs
+        pixels, sont conserves ; seuls les points isoles disparaissent.
+
+        Retourne ``(image, taux_de_speckle)``.
+        """
+        import cv2
+        import numpy as np
+        if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
+            return img_bgr, 0.0
+        gray = (cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+                if getattr(img_bgr, "ndim", 2) == 3 else img_bgr)
+        dark = (gray < 128).astype(np.uint8)
+        total = int(dark.sum())
+        if total == 0:
+            return img_bgr, 0.0
+        neigh = cv2.filter2D(dark, cv2.CV_16U, np.ones((3, 3), np.uint8))
+        isolated = int(((dark == 1) & (neigh <= 2)).sum())
+        ratio = isolated / total
+        if ratio <= 0.02:
+            return img_bgr, ratio
+        out = img_bgr
+        for _ in range(2 if ratio > 0.15 else 1):
+            out = cv2.medianBlur(out, 3)
+        return out, ratio
 
     @staticmethod
     def building_bbox(wall_mask) -> Optional[Tuple[int, int, int, int]]:
@@ -640,6 +712,9 @@ class PlanSurfaceExtractor:
 
         warns: List[str] = []
         bbox_est: List[Dict[str, Any]] = []
+        axis_stats: Dict[str, Dict[str, Any]] = {}
+        n_cotes = {"x": sum(1 for t in toks if t["horiz"]),
+                   "y": sum(1 for t in toks if not t["horiz"])}
         chain_vals = [e["px_per_m"] for e in estimates if e["method"] == "chaine"]
         chain_med = float(np.median(chain_vals)) if chain_vals else None
         if bbox is not None and toks:
@@ -673,18 +748,18 @@ class PlanSurfaceExtractor:
                     near = [min(group, key=lambda t: abs(t[axis] - center))]
                 near.sort(key=lambda t: -dist_out(t))
 
-                # Le hors-tout est la cote la plus EXTERIEURE, sauf si sa
-                # valeur contredit franchement la mediane des chaines (>25 %) :
-                # dans ce cas c'est une lecture OCR erronee et l'on retient la
-                # candidate la plus exterieure qui reste coherente.
+                # Le hors-tout est la plus GRANDE cote de l'axe : rien ne peut
+                # etre plus long que la dimension totale. Une cote de chaine
+                # isolee (ex. 15'-0" seule sur l'axe) ne peut donc pas etre
+                # prise pour un hors-tout.
+                near.sort(key=lambda t: -t["L"])
                 big = near[0]
                 if chain_med:
                     coherent = [t for t in group
                                 if abs(dim_px / t["L"] - chain_med) / chain_med <= 0.25]
                     if coherent:
-                        # la plus EXTERIEURE des cotes coherentes avec les
-                        # chaines = la vraie ligne de cote hors-tout
-                        big = max(coherent, key=dist_out)
+                        # la plus grande des cotes coherentes avec les chaines
+                        big = max(coherent, key=lambda t: t["L"])
                     else:
                         warns.append(
                             f"[ALERTE ECHELLE] aucune cote hors-tout en {tag} "
@@ -696,6 +771,10 @@ class PlanSurfaceExtractor:
                        "a": big["text"], "b": f"{dim_px}px"}
                 estimates.append(est)
                 bbox_est.append(est)
+                axis_stats[tag] = {"value": dim_px / big["L"],
+                                   "n": n_cotes[tag],
+                                   "dist": dist_out(big),
+                                   "text": big["text"]}
 
                 # Autres cotes de la MEME ligne et centrees sur l'emprise :
                 # conservees pour tracabilite. Deux valeurs tres proches
@@ -735,34 +814,45 @@ class PlanSurfaceExtractor:
             warns.append("Echelle non calibrable : aucune chaine de cotes lisible.")
             return None, 0.0, estimates, warns
 
-        bbox_vals = np.array([e["px_per_m"] for e in bbox_est
-                              if 0.5 < e["px_per_m"] < 5000])
-        if len(bbox_vals):
-            base = float(np.median(bbox_vals))
-            # Dispersion entre les deux axes : dessin non isometrique (scan
-            # deforme) -> on garde l'axe le mieux soutenu par les chaines,
-            # sinon la mediane, et on baisse la confiance.
-            spread_axes = (float(np.max(bbox_vals) - np.min(bbox_vals))
-                           / max(base, 1e-6)) if len(bbox_vals) > 1 else 0.0
-            if len(bbox_vals) > 1 and spread_axes > 0.15:
-                support_count = {
-                    float(v): sum(1 for c in vals if abs(c - v) / v <= 0.20)
-                    for v in bbox_vals}
-                best = max(support_count, key=lambda v: (support_count[v], -v))
-                if support_count[best] >= 2:
-                    base = best
-            support = [v for v in vals if abs(v - base) / base <= 0.20]
-            if len(bbox_vals) > 1 and spread_axes > 0.15:
+        # Les deux axes sont traites SEPAREMENT : sur un plan ou l'axe Y n'a
+        # qu'une cote de chaine, la moyenne des deux axes inventerait une
+        # echelle fausse (erreur x3 constatee sur les plans basse resolution).
+        vx = axis_stats.get("x", {}).get("value")
+        vy = axis_stats.get("y", {}).get("value")
+        if vx and vy:
+            ecart = abs(vx - vy) / max(vx, vy)
+            if ecart <= 0.15:
+                base = (vx + vy) / 2.0
+                conf = 0.9
+                support = [v for v in vals if abs(v - base) / base <= 0.20]
+                if len(support) >= 2:
+                    base = float(np.median(support))
+                    conf = 0.92
+            else:
+                # Axes contradictoires : on garde l'axe le mieux cote (le plus
+                # de cotes), sinon celui dont la cote est la plus eloignee.
+                sx, sy = axis_stats["x"], axis_stats["y"]
+                if sx["n"] != sy["n"]:
+                    keep = "x" if sx["n"] > sy["n"] else "y"
+                else:
+                    keep = "x" if sx["dist"] >= sy["dist"] else "y"
+                base = sx["value"] if keep == "x" else sy["value"]
+                conf = 0.55
                 warns.append(
-                    f"[ALERTE ECHELLE] cotes hors-tout X et Y incoherentes "
-                    f"({spread_axes*100:.0f} % d'ecart) : image deformee ou "
-                    f"cotes mal lues — verifier l'overlay.")
-            conf = 0.9 if len(support) >= 2 else 0.75
-            conf = max(0.0, conf - min(0.4, spread_axes))
-            med = base
-            if len(support) >= 2:
-                med = float(np.median(support))
+                    f"[ALERTE ECHELLE] axes X ({vx:.2f} px/m) et Y ({vy:.2f} px/m) "
+                    f"incoherents ({ecart*100:.0f} % d'ecart) : echelle retenue "
+                    f"sur l'axe {keep.upper()} (cote {axis_stats[keep]['text']}). "
+                    f"Verifier les cotes du plan.")
+        elif vx or vy:
+            base = vx or vy
+            conf = 0.6
+            warns.append(
+                "[ALERTE ECHELLE] une seule cote hors-tout exploitable "
+                f"({axis_stats['x' if vx else 'y']['text']}) : echelle "
+                "calibree sur un seul axe, surfaces a verifier sur l'overlay.")
         else:
+            bbox_vals = np.array([e["px_per_m"] for e in bbox_est
+                                  if 0.5 < e["px_per_m"] < 5000])
             med = float(np.median(vals))
             spread = float(np.median(np.abs(vals - med)) / med) if med else 1.0
             conf = max(0.0, min(1.0, 1.0 - spread * 2.0))
@@ -772,9 +862,18 @@ class PlanSurfaceExtractor:
                 warns.append(
                     f"[ALERTE ECHELLE] cotes incoherentes entre elles (dispersion "
                     f"{spread*100:.0f} %) : surfaces segmentees a verifier.")
+            for e in estimates:
+                e["px_per_m"] = round(e["px_per_m"], 2)
+            return round(med, 3), round(conf, 2), estimates, warns
+
+        support = [v for v in vals if abs(v - base) / base <= 0.20]
+        if len(support) >= 2:
+            base = float(np.median(support))
+        if len(support) < 2:
+            conf = min(conf, 0.75)
         for e in estimates:
             e["px_per_m"] = round(e["px_per_m"], 2)
-        return round(med, 3), round(conf, 2), estimates, warns
+        return round(base, 3), round(conf, 2), estimates, warns
 
     # ------------------------------------------------------------------
     def build_rooms(self, labels, pair_tokens, regions, wall_mask, scale, conf,

@@ -190,3 +190,99 @@ def test_piece_sans_cote_ni_echelle_non_inventee():
     assert sal.area_m2 is None
     assert sal.source in ("aucune", "zone_ouverte")
     assert any("NON TROUVEE" in w or "non fermee" in w for w in sal.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 6) Calibration AXE PAR AXE : une cote de chaine isolee sur un axe ne doit
+#    jamais etre prise pour un hors-tout (plan basse resolution : erreur x3)
+# ---------------------------------------------------------------------------
+def test_echelle_par_axe_cote_de_chaine_isolee_non_prise_pour_hors_tout():
+    img = _blank(10, 6)
+    _wall(img, 5, 0, 5, 6)
+    cx = OX + int(10 * S) // 2
+    cy = OY + int(6 * S) // 2
+    ocr = [
+        _label("SALON", 2.5, 3.0), _label("CUISINE", 7.5, 3.0, w=120),
+        # hors-tout horizontal correct
+        {"text": "10.00", "bbox": (cx - 35, OY - 70, 70, 20), "conf": 0.95},
+        # cote de CHAINE sur l'axe Y : 2 m pour 6 m dessines
+        {"text": "2.00", "bbox": (OX - 70, cy - 20, 20, 40), "conf": 0.95},
+    ]
+    rep = PlanSurfaceExtractor().extract_from_image(img, ocr_items=ocr)
+
+    # L'echelle est celle de l'axe X (100 px/m), pas 600/2 = 300 px/m
+    assert rep.scale_px_per_m == pytest.approx(100.0, rel=0.05)
+    assert rep.scale_confidence <= 0.7
+    assert any("incoh" in w for w in rep.warnings)
+    for r in _by_label(rep).values():
+        assert r.area_m2 == pytest.approx(30.0, rel=0.10)
+
+
+# ---------------------------------------------------------------------------
+# 7) Une seule cote hors-tout : echelle acceptee mais signalee
+# ---------------------------------------------------------------------------
+def test_echelle_un_seul_axe_signalee():
+    img = _blank(10, 6)
+    _wall(img, 5, 0, 5, 6)
+    cx = OX + int(10 * S) // 2
+    ocr = [_label("SALON", 2.5, 3.0), _label("CUISINE", 7.5, 3.0, w=120),
+           {"text": "10.00", "bbox": (cx - 35, OY - 70, 70, 20), "conf": 0.95}]
+    rep = PlanSurfaceExtractor().extract_from_image(img, ocr_items=ocr)
+    assert rep.scale_px_per_m == pytest.approx(100.0, rel=0.05)
+    assert any("un seul axe" in w for w in rep.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 8) Scan inverse (tirage bleu / negatif) : image redressee avant analyse
+# ---------------------------------------------------------------------------
+def test_normalize_polarity_detecte_le_negatif():
+    clair = np.full((40, 40, 3), 240, np.uint8)
+    out, inv = PlanSurfaceExtractor._normalize_polarity(clair)
+    assert inv is False and out is clair
+
+    sombre = np.full((40, 40, 3), 25, np.uint8)
+    out, inv = PlanSurfaceExtractor._normalize_polarity(sombre)
+    assert inv is True
+    assert float(out.mean()) == pytest.approx(230, abs=2)
+
+
+def test_scan_inverse_mesure_les_pieces():
+    img = _blank(10, 6)
+    _wall(img, 5, 0, 5, 6)
+    ocr = [_label("SALON", 2.5, 3.0), _label("CUISINE", 7.5, 3.0, w=120)]
+    ocr += _cotes(10, 6)
+
+    normal = PlanSurfaceExtractor().extract_from_image(img, ocr_items=ocr)
+    negatif = PlanSurfaceExtractor().extract_from_image(
+        cv2.bitwise_not(img), ocr_items=ocr)
+
+    assert any("invers" in w for w in negatif.warnings)
+    assert negatif.scale_px_per_m == pytest.approx(normal.scale_px_per_m,
+                                                   rel=0.05)
+    ref = {r.label: r.area_m2 for r in normal.rooms if r.area_m2}
+    got = {r.label: r.area_m2 for r in negatif.rooms if r.area_m2}
+    assert set(got) == set(ref)
+    for lbl, aire in ref.items():
+        assert got[lbl] == pytest.approx(aire, rel=0.05)
+
+
+# ---------------------------------------------------------------------------
+# 9) Bruit de scan (sel et poivre) : debruite, echelle juste, pieces mesurees
+# ---------------------------------------------------------------------------
+def test_bruit_sel_poivre_debruite_et_pieces_mesurees():
+    img = _blank(10, 6)
+    _wall(img, 5, 0, 5, 6)
+    rng = np.random.default_rng(1)
+    bruite = img.copy()
+    n = int(0.01 * img.shape[0] * img.shape[1])
+    bruite[rng.integers(0, img.shape[0], n),
+           rng.integers(0, img.shape[1], n)] = 0
+
+    ocr = [_label("SALON", 2.5, 3.0), _label("CUISINE", 7.5, 3.0, w=120)]
+    ocr += _cotes(10, 6)
+    rep = PlanSurfaceExtractor().extract_from_image(bruite, ocr_items=ocr)
+
+    assert any("speckle" in w.lower() for w in rep.warnings)
+    assert rep.scale_px_per_m == pytest.approx(100.0, rel=0.05)
+    for r in _by_label(rep).values():
+        assert r.area_m2 == pytest.approx(30.0, rel=0.10)

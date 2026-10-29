@@ -69,7 +69,7 @@ _DND_BASES = (ctk.CTk, TkinterDnD.DnDWrapper) if TKDND_AVAILABLE else (ctk.CTk,)
 
 APP_NAME = "PlanBA Pro"
 APP_TAGLINE = "Métré Béton Armé & Surfaces"
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 APP_TITLE = f"{APP_NAME} — {APP_TAGLINE}"
 APP_SUBTITLE = (
     "Plans BA (PDF, DXF, scans) et plans d'architecture (images) → métré "
