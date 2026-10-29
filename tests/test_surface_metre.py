@@ -130,10 +130,25 @@ def test_cote_explicite_prioritaire_et_calibration_manuelle(tmp_path):
 
 def test_alerte_cotes_hors_tout_contradictoires():
     img, ocr = _synthetic_plan()
-    # Deux cotes hors-tout centrees, en contradiction (8.00 vs 24.00)
-    ocr = ocr + [{"text": "24.00", "bbox": (150 + 400 - 20, 150 - 140, 40, 18), "conf": 0.9}]
+    # Deux cotes hors-tout centrees, lectures concurrentes de la MEME cote
+    # (8.00 m a 100 px/m). Ecart plausible -> alerte.
+    ocr = ocr + [{"text": "9.50", "bbox": (150 + 400 - 20, 150 - 110, 40, 18),
+                  "conf": 0.9}]
     rep = PlanSurfaceExtractor().extract_from_image(img, ocr_items=ocr)
     assert any("contradictoires" in w for w in rep.warnings)
+    assert rep.scale_px_per_m == pytest.approx(100.0, rel=0.05)
+
+
+def test_cote_hors_tout_erronee_ecartee_par_les_chaines():
+    """Une cote hors-tout aberrante (24.00 pour une emprise de 8.00 m) ne doit
+    pas fausser l'echelle : les chaines arbitrent, l'ecart est trace."""
+    img, ocr = _synthetic_plan()
+    ocr = ocr + [{"text": "24.00", "bbox": (150 + 400 - 20, 150 - 140, 40, 18),
+                  "conf": 0.9}]
+    rep = PlanSurfaceExtractor().extract_from_image(img, ocr_items=ocr)
+    assert rep.scale_px_per_m == pytest.approx(100.0, rel=0.05)
+    assert any("incoherente avec les chaines" in w for w in rep.warnings)
+    assert any(e["method"] == "hors_tout_x_ignoree" for e in rep.scale_estimates)
 
 
 def test_sans_texte_sans_hallucination():

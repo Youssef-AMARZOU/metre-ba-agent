@@ -143,6 +143,16 @@ def is_dimension_token(text: str) -> bool:
 
 # --- Structures -------------------------------------------------------------
 
+def _box_intersection(a: Tuple[int, int, int, int],
+                      b: Tuple[int, int, int, int]) -> int:
+    """Aire (px) de l'intersection de deux boites (x, y, w, h)."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    w = min(ax + aw, bx + bw) - max(ax, bx)
+    h = min(ay + ah, by + bh) - max(ay, by)
+    return max(0, w) * max(0, h)
+
+
 @dataclass
 class RoomSurface:
     label: str
@@ -342,7 +352,8 @@ class PlanSurfaceExtractor:
         regions = self.segment_rooms(wall_mask, rep.building_bbox,
                                      scale_px_per_m=scale)
         rep.rooms = self.build_rooms(labels, pair_tokens, regions, wall_mask,
-                                     scale, conf, rep.level, (H, W))
+                                     scale, conf, rep.level, (H, W),
+                                     bbox=rep.building_bbox)
         if not rep.rooms:
             rep.warnings.append("Aucune piece identifiee (libelles absents).")
         if overlay_dir:
@@ -498,8 +509,21 @@ class PlanSurfaceExtractor:
         """Libelles de pieces (mots alphabetiques, fusion des lignes empilees)."""
         H, W = shape
         cands = []
+        nums = []
         for it in ocr_items:
             t = str(it["text"]).strip()
+            # Numero de piece isole par l'OCR ('BEDROOM' / '2') : rattache
+            # ensuite au libelle qu'il accompagne.
+            if re.fullmatch(r"\d{1,3}", t):
+                cx0 = it["bbox"][0] + it["bbox"][2] / 2.0
+                cy0 = it["bbox"][1] + it["bbox"][3] / 2.0
+                if bbox is not None:
+                    bx0, by0, bw0, bh0 = bbox
+                    if not (bx0 <= cx0 <= bx0 + bw0 and by0 <= cy0 <= by0 + bh0):
+                        continue
+                nums.append({"text": t, "bbox": it["bbox"],
+                             "conf": float(it.get("conf", 0.8))})
+                continue
             core = re.sub(r"[\d\s\-_.]+$", "", t)
             if len(core) < 2 or not re.search(r"[A-Za-zÀ-ÿ]{2,}", core):
                 continue
@@ -521,15 +545,18 @@ class PlanSurfaceExtractor:
                 continue
             cands.append({"text": t, "bbox": it["bbox"], "conf": float(it.get("conf", 0.8)),
                           "pt": (cx, cy), "known": known})
-        # Fusion des libelles empiles ('MASTER' / 'BATH')
+        # Fusion des libelles empiles ('MASTER' / 'BATH'). Les boites OCR de
+        # deux lignes peuvent se CHEVAUCHER de 1-2 px : le test de proximite
+        # doit donc tolerer un recouvrement, sinon le libelle reste scinde.
         cands.sort(key=lambda c: (c["pt"][1], c["pt"][0]))
         merged: List[Dict[str, Any]] = []
         for c in cands:
             x, y, w, h = c["bbox"]
             for m in merged:
                 mx, my, mw, mh = m["bbox"]
+                gap = y - (my + mh)
                 if (abs((mx + mw / 2) - (x + w / 2)) < max(mw, w) * 0.6
-                        and 0 <= y - (my + mh) < 1.2 * max(h, mh)):
+                        and -0.6 * min(h, mh) <= gap <= 1.2 * max(h, mh)):
                     m["text"] = f"{m['text']} {c['text']}"
                     nx0, ny0 = min(mx, x), min(my, y)
                     nx1, ny1 = max(mx + mw, x + w), max(my + mh, y + h)
@@ -540,6 +567,34 @@ class PlanSurfaceExtractor:
                     break
             else:
                 merged.append(dict(c))
+
+        # Numero de piece rattache au libelle ('BEDROOM' + '2')
+        merged.sort(key=lambda m: m["bbox"][1] + m["bbox"][3])
+        for num in nums:
+            nx, ny, nw, nh = num["bbox"]
+            ncx, ncy = nx + nw / 2.0, ny + nh / 2.0
+            best, best_d = None, None
+            for m in merged:
+                mx, my, mw, mh = m["bbox"]
+                # soit juste sous le libelle, soit sur la meme ligne a droite
+                below = (-0.6 * min(nh, mh) <= ny - (my + mh) <= 1.2 * mh
+                         and abs((mx + mw / 2) - ncx) < 0.8 * max(mw, nw))
+                right = (abs((my + mh / 2) - ncy) < 0.5 * mh
+                         and 0 <= nx - (mx + mw) <= 1.2 * mh)
+                if not (below or right):
+                    continue
+                dist = abs(ncy - (my + mh / 2)) + abs(ncx - (mx + mw / 2))
+                if best_d is None or dist < best_d:
+                    best, best_d = m, dist
+            if best is None:
+                continue
+            mx, my, mw, mh = best["bbox"]
+            best["text"] = f"{best['text']} {num['text']}"
+            nx0, ny0 = min(mx, nx), min(my, ny)
+            nx1, ny1 = max(mx + mw, nx + nw), max(my + mh, ny + nh)
+            best["bbox"] = (nx0, ny0, nx1 - nx0, ny1 - ny0)
+            best["pt"] = (nx0 + (nx1 - nx0) / 2.0, ny0 + (ny1 - ny0) / 2.0)
+            best["conf"] = min(best["conf"], num["conf"])
         return merged
 
     # ------------------------------------------------------------------
@@ -558,7 +613,7 @@ class PlanSurfaceExtractor:
                 continue
             x, y, w, h = it["bbox"]
             toks.append({"L": L, "cx": x + w / 2.0, "cy": y + h / 2.0,
-                         "horiz": w >= h, "text": it["text"]})
+                         "h": h, "horiz": w >= h, "text": it["text"]})
         estimates: List[Dict[str, Any]] = []
         tol = max(8.0, 0.012 * max(H, W))
 
@@ -584,11 +639,14 @@ class PlanSurfaceExtractor:
         chains([t for t in toks if not t["horiz"]], "cx", "cy")
 
         warns: List[str] = []
+        bbox_est: List[Dict[str, Any]] = []
+        chain_vals = [e["px_per_m"] for e in estimates if e["method"] == "chaine"]
+        chain_med = float(np.median(chain_vals)) if chain_vals else None
         if bbox is not None and toks:
             bx, by, bw, bh = bbox
-            # Cotes hors-tout : situees HORS de l'enveloppe (au-dessus / en
-            # dessous pour les horizontales, a gauche / droite pour les
-            # verticales) et de grande valeur.
+            # Cotes hors-tout : situees HORS de l'enveloppe (au-dessus /
+            # en dessous pour les horizontales, a gauche / droite pour les
+            # verticales) et CENTREES sur l'emprise.
             horiz = [t for t in toks if t["horiz"]
                      and (t["cy"] < by or t["cy"] > by + bh)]
             vert = [t for t in toks if not t["horiz"]
@@ -596,48 +654,131 @@ class PlanSurfaceExtractor:
             for group, dim_px, tag in ((horiz, bw, "x"), (vert, bh, "y")):
                 if not group:
                     continue
-                ordered = sorted(group, key=lambda t: -t["L"])
-                big = ordered[0]
-                estimates.append({"method": f"hors_tout_{tag}",
-                                  "px_per_m": dim_px / big["L"],
-                                  "a": big["text"], "b": f"{dim_px}px"})
-                # Cotes centrees sur l'enveloppe = cotes hors-tout. Deux
-                # valeurs tres differentes pour la meme emprise : plan
-                # incoherent -> l'ingenieur doit saisir la largeur reelle.
                 axis = "cx" if tag == "x" else "cy"
+                across = "cy" if tag == "x" else "cx"
                 origin = bx if tag == "x" else by
-                centered = [t for t in group
-                            if abs(t[axis] - (origin + dim_px / 2.0)) < 0.15 * dim_px
-                            and t["L"] >= 0.25 * big["L"]]
-                if len(centered) >= 2:
-                    lo = min(centered, key=lambda t: t["L"])
-                    hi = max(centered, key=lambda t: t["L"])
-                    if hi["L"] / max(lo["L"], 1e-6) > 1.8:
+                lo_edge, hi_edge = (by, by + bh) if tag == "x" else (bx, bx + bw)
+
+                def dist_out(t, _axis=across, _lo=lo_edge, _hi=hi_edge):
+                    """Eloignement de la cote par rapport au nu des murs
+                    (coordonnee perpendiculaire a l'axe de la cote)."""
+                    v = t[_axis]
+                    return v - _hi if v > _hi else _lo - v
+
+                # Candidates = cotes centrees sur l'emprise (meme ligne que la
+                # plus eloignee). Une cote de chaine n'est pas centree.
+                center = origin + dim_px / 2.0
+                near = [t for t in group if abs(t[axis] - center) < 0.05 * dim_px]
+                if not near:
+                    near = [min(group, key=lambda t: abs(t[axis] - center))]
+                near.sort(key=lambda t: -dist_out(t))
+
+                # Le hors-tout est la cote la plus EXTERIEURE, sauf si sa
+                # valeur contredit franchement la mediane des chaines (>25 %) :
+                # dans ce cas c'est une lecture OCR erronee et l'on retient la
+                # candidate la plus exterieure qui reste coherente.
+                big = near[0]
+                if chain_med:
+                    coherent = [t for t in group
+                                if abs(dim_px / t["L"] - chain_med) / chain_med <= 0.25]
+                    if coherent:
+                        # la plus EXTERIEURE des cotes coherentes avec les
+                        # chaines = la vraie ligne de cote hors-tout
+                        big = max(coherent, key=dist_out)
+                    else:
+                        warns.append(
+                            f"[ALERTE ECHELLE] aucune cote hors-tout en {tag} "
+                            f"coherente avec les chaines ({chain_med:.1f} px/m) : "
+                            f"{', '.join(t['text'] for t in near)}. Cote retenue "
+                            f"= {big['text']} — verifier la lecture du plan.")
+                est = {"method": f"hors_tout_{tag}",
+                       "px_per_m": dim_px / big["L"],
+                       "a": big["text"], "b": f"{dim_px}px"}
+                estimates.append(est)
+                bbox_est.append(est)
+
+                # Autres cotes de la MEME ligne et centrees sur l'emprise :
+                # conservees pour tracabilite. Deux valeurs tres proches
+                # (ratio >= 0.55, soit moins de 1.8x) = lecture douteuse de la
+                # meme cote -> ALERTE. Un ecart plus grand = cote de chaine
+                # (ex. 51'-0" sous un hors-tout de 192'-0") -> ignoree.
+                for t in near:
+                    if t is big:
+                        continue
+                    ratio = min(t["L"], big["L"]) / max(t["L"], big["L"])
+                    conflict = (ratio >= 0.55
+                                and abs(t["L"] - big["L"]) / big["L"] > 0.03)
+                    ppm = dim_px / t["L"]
+                    estimates.append({
+                        "method": f"hors_tout_{tag}_conflit" if conflict
+                                  else f"hors_tout_{tag}_ignoree",
+                        "px_per_m": ppm, "a": t["text"], "b": f"{dim_px}px"})
+                    if conflict:
                         warns.append(
                             f"[ALERTE ECHELLE] cotes hors-tout contradictoires en "
-                            f"{tag} : {hi['text']} vs {lo['text']} pour la même "
+                            f"{tag} : {big['text']} vs {t['text']} pour la même "
                             f"emprise. Saisir la largeur hors-tout réelle (m).")
+                    elif dist_out(t) > dist_out(big) + 1.0 and chain_med:
+                        warns.append(
+                            f"[ALERTE ECHELLE] cote hors-tout {t['text']} en {tag} "
+                            f"incoherente avec les chaines ({ppm:.1f} px/m contre "
+                            f"{chain_med:.1f} px/m) : cote retenue = {big['text']}. "
+                            f"Verifier la lecture sur le plan.")
 
-        vals = np.array([e["px_per_m"] for e in estimates if 0.5 < e["px_per_m"] < 5000])
+        # --- Agregation : le hors-tout prime, les chaines servent de controle
+        # (un plan cote en pieds a des chaines bruitees par l'OCR ; la cote
+        # hors-tout relie directement l'emprise dessinee a la dimension reelle)
+        used = [e for e in estimates
+                if not e["method"].endswith(("_ignoree", "_conflit"))]
+        vals = np.array([e["px_per_m"] for e in used if 0.5 < e["px_per_m"] < 5000])
         if len(vals) == 0:
             warns.append("Echelle non calibrable : aucune chaine de cotes lisible.")
             return None, 0.0, estimates, warns
-        med = float(np.median(vals))
-        spread = float(np.median(np.abs(vals - med)) / med) if med else 1.0
-        conf = max(0.0, min(1.0, 1.0 - spread * 2.0))
-        if len(vals) < 2:
-            conf = min(conf, 0.5)
-        if spread > 0.25:
-            warns.append(
-                f"[ALERTE ECHELLE] cotes incoherentes entre elles (dispersion "
-                f"{spread*100:.0f} %) : surfaces segmentees a verifier.")
+
+        bbox_vals = np.array([e["px_per_m"] for e in bbox_est
+                              if 0.5 < e["px_per_m"] < 5000])
+        if len(bbox_vals):
+            base = float(np.median(bbox_vals))
+            # Dispersion entre les deux axes : dessin non isometrique (scan
+            # deforme) -> on garde l'axe le mieux soutenu par les chaines,
+            # sinon la mediane, et on baisse la confiance.
+            spread_axes = (float(np.max(bbox_vals) - np.min(bbox_vals))
+                           / max(base, 1e-6)) if len(bbox_vals) > 1 else 0.0
+            if len(bbox_vals) > 1 and spread_axes > 0.15:
+                support_count = {
+                    float(v): sum(1 for c in vals if abs(c - v) / v <= 0.20)
+                    for v in bbox_vals}
+                best = max(support_count, key=lambda v: (support_count[v], -v))
+                if support_count[best] >= 2:
+                    base = best
+            support = [v for v in vals if abs(v - base) / base <= 0.20]
+            if len(bbox_vals) > 1 and spread_axes > 0.15:
+                warns.append(
+                    f"[ALERTE ECHELLE] cotes hors-tout X et Y incoherentes "
+                    f"({spread_axes*100:.0f} % d'ecart) : image deformee ou "
+                    f"cotes mal lues — verifier l'overlay.")
+            conf = 0.9 if len(support) >= 2 else 0.75
+            conf = max(0.0, conf - min(0.4, spread_axes))
+            med = base
+            if len(support) >= 2:
+                med = float(np.median(support))
+        else:
+            med = float(np.median(vals))
+            spread = float(np.median(np.abs(vals - med)) / med) if med else 1.0
+            conf = max(0.0, min(1.0, 1.0 - spread * 2.0))
+            if len(vals) < 2:
+                conf = min(conf, 0.5)
+            if spread > 0.25:
+                warns.append(
+                    f"[ALERTE ECHELLE] cotes incoherentes entre elles (dispersion "
+                    f"{spread*100:.0f} %) : surfaces segmentees a verifier.")
         for e in estimates:
             e["px_per_m"] = round(e["px_per_m"], 2)
         return round(med, 3), round(conf, 2), estimates, warns
 
     # ------------------------------------------------------------------
     def build_rooms(self, labels, pair_tokens, regions, wall_mask, scale, conf,
-                    level, shape) -> List[RoomSurface]:
+                    level, shape, bbox=None) -> List[RoomSurface]:
         import numpy as np
         H, W = shape
         radius = 0.22 * math.hypot(H, W)
@@ -679,17 +820,38 @@ class PlanSurfaceExtractor:
             if rg is not None:
                 labels_in_region.setdefault(rg["id"], []).append(li)
 
+        boxes = {b["label_index"]: b
+                 for b in self.room_boxes(wall_mask, labels, bbox)}
+        env_rooms: List[RoomSurface] = []
+
         for li, lb in enumerate(labels):
             room = RoomSurface(label=lb["text"].upper(), level=level,
                                bbox=tuple(int(v) for v in lb["bbox"]),
                                confidence=lb["conf"])
             region = region_of[li]
             shared = region is not None and len(labels_in_region[region["id"]]) > 1
+
+            # Surface mesuree pour ce libelle seul (rayons vers les murs) :
+            # insensible aux portes ouvertes, contrairement au scellement.
+            box = boxes.get(li) or {}
+            box_px = box.get("box")
+            env_px = box.get("box_env")
+            clamped_sides = box.get("clamped_sides") or []
+            box_area = box_perim = None
+            if scale and box_px:
+                _, _, bwp, bhp = box_px
+                box_area = round((bwp * bhp) / (scale ** 2), 2)
+                box_perim = round(2 * (bwp + bhp) / scale, 2)
+
+            seg_area = None
+            if scale and region is not None and not shared:
+                seg_area = round(region["area_px"] / (scale ** 2), 2)
+
             if region is not None:
                 room.region_bbox = tuple(int(v) for v in region["bbox"])
-                if scale and not shared:
-                    room.area_segmented_m2 = round(region["area_px"] / (scale ** 2), 2)
-                    room.perimeter_m = round(region["perimeter_px"] / scale, 2)
+            if box_px:
+                room.region_bbox = tuple(int(v) for v in box_px)
+
             if li in assign:
                 it, (a, b) = pair_tokens[assign[li]]
                 room.length_m, room.width_m = max(a, b), min(a, b)
@@ -698,22 +860,71 @@ class PlanSurfaceExtractor:
                     room.perimeter_m = round(2 * (a + b), 2)
                 room.source = "cote_explicite"
                 room.confidence = round(min(lb["conf"], float(it.get("conf", 0.8))), 2)
-                if room.area_segmented_m2:
-                    ratio = room.area_segmented_m2 / max(room.area_explicit_m2, 1e-6)
-                    if not (0.6 <= ratio <= 1.6):
-                        room.warnings.append(
-                            f"Ecart cote explicite ({room.area_explicit_m2} m²) vs "
-                            f"segmentation ({room.area_segmented_m2} m²) : a verifier.")
-            elif room.area_segmented_m2:
+                for measured, tag in ((box_area, "boite ancree"),
+                                      (seg_area, "segmentation")):
+                    if measured:
+                        ratio = measured / max(room.area_explicit_m2, 1e-6)
+                        if not (0.6 <= ratio <= 1.6):
+                            room.warnings.append(
+                                f"Ecart cote explicite ({room.area_explicit_m2} m²) vs "
+                                f"{tag} ({measured} m²) : a verifier.")
+            elif seg_area and seg_area >= 2.0:
+                # Region EXCLUSIVE au libelle : geometrie reelle des murs,
+                # donc exacte meme pour une piece en L (la boite ancree, elle,
+                # la surestimerait). La boite ne sert plus que de controle.
+                room.area_segmented_m2 = seg_area
+                room.perimeter_m = round(region["perimeter_px"] / scale, 2)
+                _rx, _ry, _rw, _rh = region["bbox"]
+                room.width_m, room.length_m = sorted(
+                    (round(_rh / scale, 2), round(_rw / scale, 2)))
                 room.source = "segmentation"
                 room.confidence = round(min(lb["conf"], conf), 2)
                 if conf < 0.5:
                     room.warnings.append("Echelle peu fiable : surface indicative.")
-                if room.area_segmented_m2 < 3.0:
+                if box_area and not (0.75 <= box_area / max(seg_area, 1e-6) <= 1.35):
+                    room.warnings.append(
+                        f"Boite ancree {box_area} m² vs region {seg_area} m² : piece "
+                        f"non rectangulaire (en L) ou cloison ouverte — surface "
+                        f"retenue = region mesuree.")
+                if seg_area < 3.0:
                     room.confidence = round(room.confidence * 0.5, 2)
                     room.warnings.append(
                         "Région suspecte (< 3 m²) : mobilier ou cloison non fermée ? "
                         "À vérifier sur l'overlay.")
+            elif box_area and box_area >= 2.0:
+                # Region partagee (ouverture, porte) : la boite ancree au
+                # libelle isole la piece, insensible aux portes ouvertes.
+                room.area_segmented_m2 = box_area
+                room.perimeter_m = box_perim
+                room.width_m, room.length_m = sorted(
+                    (round(box_px[3] / scale, 2), round(box_px[2] / scale, 2)))
+                room.source = "segmentation"
+                room.confidence = round(min(lb["conf"], conf, 0.85), 2)
+                if conf < 0.5:
+                    room.warnings.append("Echelle peu fiable : surface indicative.")
+            elif scale and env_px and shared:
+                # Cote ouvert (grande ouverture, pas de cloison) : mesure
+                # bornee par l'ENVELOPPE du batiment, jamais au-dela.
+                _, _, ewp, ehp = env_px
+                room.area_segmented_m2 = round((ewp * ehp) / (scale ** 2), 2)
+                room.perimeter_m = round(2 * (ewp + ehp) / scale, 2)
+                room.width_m, room.length_m = sorted(
+                    (round(ehp / scale, 2), round(ewp / scale, 2)))
+                room.region_bbox = tuple(int(v) for v in env_px)
+                room.source = "segmentation"
+                room.confidence = round(min(lb["conf"], conf, 0.7), 2)
+                room.warnings.append(
+                    "Cote(s) ouvert(s) : " + ", ".join(clamped_sides)
+                    + " — mesure bornee par l'enveloppe du batiment "
+                    "(aucune cloison trouvee). A verifier sur l'overlay.")
+                env_rooms.append(room)
+                if shared:
+                    room.warnings.append(
+                        "Espace partage avec "
+                        + ", ".join(labels[j]["text"].upper()
+                                    for j in labels_in_region[region["id"]]
+                                    if j != li)
+                        + " : surfaces reparties au prorata des pieces mesurees.")
             elif shared:
                 others = [labels[j]["text"].upper()
                           for j in labels_in_region[region["id"]] if j != li]
@@ -726,11 +937,40 @@ class PlanSurfaceExtractor:
                 room.source = "aucune"
                 room.confidence = 0.0
                 room.warnings.append(
-                    "Surface NON TROUVEE : ni cote 'L x l' ni echelle exploitable.")
+                    "Surface NON TROUVEE : piece non fermee, ni cote 'L x l' "
+                    "ni echelle exploitable.")
             rooms.append(room)
 
+        # Regions partagees (ouverture large, plan libre) : la surface de la
+        # region est la seule mesure fiable. On repartit cette surface entre
+        # les pieces au prorata de leurs mesures individuelles -> la somme
+        # reste egale a la surface reelle (aucun double comptage, aucun
+        # metre carre invente).
+        if scale:
+            for rid, lis in labels_in_region.items():
+                if len(lis) < 2:
+                    continue
+                region = next(r for r in regions if r["id"] == rid)
+                seg = region["area_px"] / (scale ** 2)
+                indiv = [rooms[j].area_segmented_m2 for j in lis]
+                if any(v is None for v in indiv) or sum(indiv) <= 0:
+                    continue
+                total = float(sum(indiv))
+                if abs(total - seg) / max(seg, 1e-6) <= 0.02:
+                    continue
+                factor = seg / total
+                for j, v in zip(lis, indiv):
+                    rooms[j].area_segmented_m2 = round(v * factor, 2)
+                    if rooms[j].perimeter_m:
+                        rooms[j].perimeter_m = round(
+                            rooms[j].perimeter_m * math.sqrt(factor), 2)
+                    rooms[j].warnings.append(
+                        f"Region partagee {seg:.2f} m² repartie au prorata des "
+                        f"pieces mesurees (facteur {factor:.3f}) : la somme "
+                        f"egale la surface de la region.")
+
         # Zones ouvertes : une ligne par region partagee, surface segmentee
-        # moins les cotes explicites deja comptees (jamais de double comptage)
+        # moins ce qui est deja compte (cotes explicites ET boites mesurees).
         if scale:
             for rid, lis in labels_in_region.items():
                 if len(lis) < 2:
@@ -738,23 +978,155 @@ class PlanSurfaceExtractor:
                 region = next(r for r in regions if r["id"] == rid)
                 seg = region["area_px"] / (scale ** 2)
                 explicit = sum(rooms[j].area_explicit_m2 or 0.0 for j in lis)
-                residual = round(seg - explicit, 2)
+                measured = sum(rooms[j].area_segmented_m2 or 0.0 for j in lis)
+                residual = round(seg - explicit - measured, 2)
+                # Toutes les pieces de la zone sont mesurees : la ligne de
+                # zone ferait doublon.
+                if all(rooms[j].area_m2 for j in lis) or residual < 0.5:
+                    continue
                 names = " + ".join(labels[j]["text"].upper() for j in lis)
                 zone = RoomSurface(
                     label=f"ZONE OUVERTE ({names})", level=level,
-                    area_segmented_m2=max(0.0, residual),
+                    area_segmented_m2=residual,
                     perimeter_m=round(region["perimeter_px"] / scale, 2),
                     source="segmentation", confidence=round(conf, 2),
                     bbox=tuple(int(v) for v in region["bbox"]),
                     region_bbox=tuple(int(v) for v in region["bbox"]))
                 zone.warnings.append(
                     f"Région segmentée {seg:.2f} m² − cotes explicites "
-                    f"{explicit:.2f} m² = {max(0.0, residual):.2f} m².")
-                if residual < 0:
-                    zone.warnings.append(
-                        "[ALERTE] cotes explicites > surface segmentée : vérifier l'échelle.")
+                    f"{explicit:.2f} m² − pieces mesurees {measured:.2f} m² "
+                    f"= {residual:.2f} m².")
                 rooms.append(zone)
+
+        # Anti double comptage : deux boites qui se recouvrent (faux libelle
+        # scinde, placard dans une chambre) -> on retire l'intersection de la
+        # plus petite et on trace l'ajustement.
+        for i, a in enumerate(rooms):
+            for b in rooms[i + 1:]:
+                # Les mesures bornees par l'enveloppe se recouvrent par
+                # construction : la repartition au prorata ci-dessus a deja
+                # garanti l'absence de double comptage.
+                if a in env_rooms or b in env_rooms:
+                    continue
+                if not (a.area_segmented_m2 and b.area_segmented_m2):
+                    continue
+                if not (a.region_bbox and b.region_bbox):
+                    continue
+                inter = _box_intersection(a.region_bbox, b.region_bbox)
+                if inter <= 0:
+                    continue
+                small, big = (a, b) if a.area_segmented_m2 <= b.area_segmented_m2 else (b, a)
+                share = inter / max(
+                    small.region_bbox[2] * small.region_bbox[3], 1)
+                if share < 0.15:
+                    continue
+                small.area_segmented_m2 = round(
+                    max(0.0, small.area_segmented_m2 - inter / (scale ** 2)), 2)
+                small.warnings.append(
+                    f"Recouvrement avec « {big.label} » : {inter / (scale ** 2):.2f} m² "
+                    f"retires pour eviter un double comptage.")
         return rooms
+
+    @staticmethod
+    def room_boxes(wall_mask, labels: Sequence[Dict[str, Any]],
+                   bbox: Optional[Tuple[int, int, int, int]],
+                   max_open_ratio: float = 0.6) -> List[Dict[str, Any]]:
+        """Boite de piece ancree sur son libelle (4 rayons vers les murs).
+
+        Methode volontairement conservatrice, independante du scellement des
+        portes : depuis le libelle, on cherche le premier mur a gauche, a
+        droite, en haut et en bas. Un cote sans mur proche est declare
+        OUVERT (piece non fermee) : aucune surface n'est inventee.
+
+        Retourne, par libelle, la boite en PIXELS et ses distances ; la
+        conversion en metres se fait avec l'echelle calibree.
+        """
+        import numpy as np
+
+        H, W = wall_mask.shape
+        bx, by, bw, bh = bbox or (0, 0, W, H)
+        out: List[Dict[str, Any]] = []
+
+        for li, lb in enumerate(labels):
+            x, y, w, h = (int(v) for v in lb["bbox"])
+            cx = min(max(1, x + w // 2), W - 2)
+            cy = min(max(1, y + h // 2), H - 2)
+
+            # 5 rayons par direction (medianes) : un trou de porte sur un
+            # rayon isole ne fausse pas la mesure.
+            ys = [min(max(1, cy + dy), H - 2)
+                  for dy in (-h, -h // 2, 0, h // 2, h)]
+            xs = [min(max(1, cx + dx), W - 2)
+                  for dx in (-w, -w // 2, 0, w // 2, w)]
+
+            def dist_left(yy):
+                row = wall_mask[yy, :cx]
+                idx = np.flatnonzero(row)
+                return int(cx - idx[-1]) if idx.size else None
+
+            def dist_right(yy):
+                row = wall_mask[yy, cx + 1:]
+                idx = np.flatnonzero(row)
+                return int(idx[0] + 1) if idx.size else None
+
+            def dist_up(xx):
+                col = wall_mask[:cy, xx]
+                idx = np.flatnonzero(col)
+                return int(cy - idx[-1]) if idx.size else None
+
+            def dist_down(xx):
+                col = wall_mask[cy + 1:, xx]
+                idx = np.flatnonzero(col)
+                return int(idx[0] + 1) if idx.size else None
+
+            def robust(getter, probes):
+                vals = [v for v in (getter(p) for p in probes)
+                        if v is not None and v > 2]
+                return int(np.median(vals)) if vals else None
+
+            dl = robust(dist_left, ys)
+            dr = robust(dist_right, ys)
+            du = robust(dist_up, xs)
+            dd = robust(dist_down, xs)
+
+            open_sides = []
+            if dl is None or dl > max_open_ratio * bw:
+                open_sides.append("gauche")
+            if dr is None or dr > max_open_ratio * bw:
+                open_sides.append("droite")
+            if du is None or du > max_open_ratio * bh:
+                open_sides.append("haut")
+            if dd is None or dd > max_open_ratio * bh:
+                open_sides.append("bas")
+
+            # Mesure de repli : un cote ouvert (grande ouverture, absence de
+            # cloison) est borne par l'ENVELOPPE du batiment. Aucune piece ne
+            # peut depasser l'enveloppe : on ne fabrique donc aucune surface,
+            # on borne une mesure deja ancree sur les murs.
+            env = {"gauche": cx - bx, "droite": (bx + bw) - cx,
+                   "haut": cy - by, "bas": (by + bh) - cy}
+            res = {"gauche": dl, "droite": dr, "haut": du, "bas": dd}
+            clamped = []
+            for side in open_sides:
+                res[side] = env[side]
+                clamped.append(side)
+            box_env = None
+            if clamped and all(isinstance(v, int) and v > 2 for v in res.values()):
+                box_env = (cx - res["gauche"], cy - res["haut"],
+                           res["gauche"] + res["droite"],
+                           res["haut"] + res["bas"])
+
+            out.append({
+                "label_index": li,
+                "point": (cx, cy),
+                "dist": {"left": dl, "right": dr, "up": du, "down": dd},
+                "open_sides": open_sides,
+                "clamped_sides": clamped,
+                "box_env": box_env,
+                "box": None if open_sides or None in (dl, dr, du, dd) else
+                       (cx - dl, cy - du, dl + dr, du + dd),
+            })
+        return out
 
     # ------------------------------------------------------------------
     @staticmethod
