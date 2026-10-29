@@ -68,6 +68,13 @@ class ResultsWorkspace(ctk.CTkFrame):
         actions = ctk.CTkFrame(head, fg_color="transparent")
         actions.grid(row=0, column=1, sticky="e")
         self.actions: Dict[str, ctk.CTkButton] = {}
+        # Retour au menu des plans (historique local)
+        ctk.CTkButton(
+            actions, text="← Mes plans", font=font(11), height=30, width=0,
+            corner_radius=5, fg_color="transparent", hover_color=T["bg_hover"],
+            border_width=1, border_color=T["border"], text_color=T["text_dim"],
+            command=lambda: self.on_action("plans")).pack(side="left",
+                                                          padx=(0, 6))
         for key, label, primary in (
                 ("metre", "📂  Métré BA (Excel)", True),
                 ("surfaces", "📐  Surfaces", False),

@@ -57,8 +57,14 @@ def add_entry(nom: str, fichier: str, *, type_analyse: str = "ba",
               statut: str = "Terminé", dossier: str = "",
               livrables: Optional[Dict[str, str]] = None,
               alertes: int = 0, surfaces: float = 0.0,
+              plan_data: Optional[Dict[str, Any]] = None,
               output_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Ajoute (ou met a jour, meme fichier + meme nom) une fiche projet."""
+    """Ajoute (ou met a jour, meme fichier + meme nom) une fiche projet.
+
+    ``plan_data`` : instantane des donnees du plan. Il est ecrit dans
+    ``<sortie>/projets/<id>/plan_data.json`` afin que la carte du menu
+    « Mes plans » puisse rouvrir CE projet precis (et pas le dernier analyse).
+    """
     entries = load_history(output_dir)
     fichier_nom = os.path.basename(fichier or "")
     for entry in entries:
@@ -71,6 +77,9 @@ def add_entry(nom: str, fichier: str, *, type_analyse: str = "ba",
                 "livrables": livrables or entry.get("livrables", {}),
                 "alertes": int(alertes), "surfaces": round(surfaces, 2),
             })
+            snap = _write_snapshot(entry.get("id", ""), plan_data, output_dir)
+            if snap:
+                entry["snapshot"] = snap
             save_history(entries, output_dir)
             return entry
 
@@ -88,11 +97,31 @@ def add_entry(nom: str, fichier: str, *, type_analyse: str = "ba",
         "statut": statut,
         "dossier": dossier,
         "livrables": livrables or {},
-        "alertes": int(alertes),
+        "alerte": int(alertes),
     }
     entries.insert(0, entry)
+    snap = _write_snapshot(entry["id"], plan_data, output_dir)
+    if snap:
+        entry["snapshot"] = snap
     save_history(entries, output_dir)
     return entry
+
+
+def _write_snapshot(entry_id: str, plan_data: Optional[Dict[str, Any]],
+                    output_dir: Optional[Path] = None) -> str:
+    """Ecrit l'instantane d'un projet et retourne son chemin ('' si echec)."""
+    if not plan_data or not entry_id:
+        return ""
+    try:
+        base = _history_path(output_dir).parent
+        folder = Path(base) / "projets" / entry_id
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "plan_data.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(plan_data, f, ensure_ascii=False, indent=2)
+        return str(path)
+    except Exception:
+        return ""
 
 
 def remove_entry(entry_id: str, output_dir: Optional[Path] = None) -> None:

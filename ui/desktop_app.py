@@ -69,7 +69,7 @@ _DND_BASES = (ctk.CTk, TkinterDnD.DnDWrapper) if TKDND_AVAILABLE else (ctk.CTk,)
 
 APP_NAME = "PlanBA Pro"
 APP_TAGLINE = "Métré Béton Armé & Surfaces"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 APP_TITLE = f"{APP_NAME} — {APP_TAGLINE}"
 APP_SUBTITLE = (
     "Plans BA (PDF, DXF, scans) et plans d'architecture (images) → métré "
@@ -2197,14 +2197,17 @@ class PlanBAMetreApp(*_DND_BASES):
         SidebarButton(bar, "＋  Nouveau métré…", self._open_metre_modal,
                       primary=True).grid(row=1, column=0, sticky="ew",
                                          padx=16, pady=(0, 8))
+        # Menu des plans deja traites (historique local)
+        self.btn_plans = SidebarButton(bar, "🗂  Mes plans", self._show_home)
+        self.btn_plans.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
         SidebarButton(bar, "📁  Ouvrir un plan…", self._browse_plan).grid(
-            row=2, column=0, sticky="ew", padx=16)
+            row=3, column=0, sticky="ew", padx=16)
 
         spacer = ctk.CTkFrame(bar, fg_color="transparent")
-        spacer.grid(row=3, column=0, sticky="nsew")
+        spacer.grid(row=4, column=0, sticky="nsew")
 
         local = ctk.CTkFrame(bar, fg_color="transparent")
-        local.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 10))
+        local.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 10))
         ctk.CTkLabel(local, text="🛡  100 % local", font=font(10, "bold"),
                      text_color=TOKENS["success"]).pack(anchor="w")
         ctk.CTkLabel(local, text="Aucun envoi sur internet",
@@ -2212,10 +2215,25 @@ class PlanBAMetreApp(*_DND_BASES):
             anchor="w", pady=(1, 0))
 
         SidebarButton(bar, "📁  Dossier de sortie", self._open_output_folder).grid(
-            row=5, column=0, sticky="ew", padx=16, pady=(0, 4))
+            row=6, column=0, sticky="ew", padx=16, pady=(0, 4))
         ctk.CTkLabel(bar, text=f"v{APP_VERSION}  ·  BAEL 91 · RPS 2000 v2011",
                      font=font(8), text_color="#6b6b6b").grid(
-            row=6, column=0, sticky="w", padx=16, pady=(0, 12))
+            row=7, column=0, sticky="w", padx=16, pady=(0, 12))
+
+        self._refresh_plans_button()
+
+    def _refresh_plans_button(self):
+        """Affiche le nombre de plans enregistres sur le bouton du menu."""
+        try:
+            from core.history import load_history
+            n = len(load_history())
+        except Exception:
+            n = 0
+        label = "🗂  Mes plans" + (f"  ({n})" if n else "")
+        try:
+            self.btn_plans.configure(text=label)
+        except Exception:
+            pass
 
     def _build_metre_modal(self):
         from ui.design import Badge, Banner, T as TOKENS
@@ -2370,6 +2388,7 @@ class PlanBAMetreApp(*_DND_BASES):
         self.workspace.grid_remove()
         self.home.grid(row=0, column=0, sticky="nsew")
         self.home.refresh()
+        self._refresh_plans_button()
         self.lbl_top_etat.configure(text="Prêt")
 
     def _show_workspace(self):
@@ -2383,6 +2402,7 @@ class PlanBAMetreApp(*_DND_BASES):
          "surfaces": self._open_surfaces_excel,
          "overlay": self._open_overlay,
          "corriger": self._open_correction,
+         "plans": self._show_home,
          "dossier": self._open_output_folder}.get(key, lambda: None)()
 
     def _refresh_workspace(self, plan_data=None, surfaces=None,
@@ -2435,7 +2455,8 @@ class PlanBAMetreApp(*_DND_BASES):
                 acier=tot.get("acier", 0.0), chute=chute, statut=statut,
                 dossier=str(get_output_dir()),
                 surfaces=vm.get("surfaces", {}).get("total", 0.0),
-                alertes=len(vm.get("anomalies", [])))
+                alertes=len(vm.get("anomalies", [])),
+                plan_data=self.plan_data)
         except Exception:
             pass
         self.home.refresh()
@@ -2445,8 +2466,11 @@ class PlanBAMetreApp(*_DND_BASES):
     def _open_project(self, entry: dict):
         import json
         from core.paths import get_output_dir
-        dossier = Path(entry.get("dossier") or get_output_dir())
-        plan_json = dossier / "plan_data.json"
+        snap = entry.get("snapshot") or ""
+        plan_json = Path(snap) if snap else Path()
+        if not snap or not plan_json.exists():
+            dossier = Path(entry.get("dossier") or get_output_dir())
+            plan_json = dossier / "plan_data.json"
         if not plan_json.exists():
             from tkinter import messagebox
             messagebox.showinfo(
