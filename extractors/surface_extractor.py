@@ -328,6 +328,7 @@ class PlanSurfaceExtractor:
                 f"Bruit de scan (speckle {speckle*100:.1f} % de pixels isolés) : "
                 "image débruitée avant analyse.")
 
+        from_engine = ocr_items is None
         if ocr_items is None:
             ocr_items = self.ocr.recognize(img_bgr) if self.ocr.available else []
             rep.ocr_engine = self.ocr.engine_name
@@ -337,18 +338,71 @@ class PlanSurfaceExtractor:
         if not ocr_items:
             rep.warnings.append("Aucun texte lu (OCR indisponible ou image vide).")
             return rep
+        # Un moteur OCR renvoie parfois DEUX fois le meme jeton (meme boite)
+        # sur un plan dense : la piece est alors mesuree deux fois et coupee
+        # en deux (SALON en L : 36,5 m2 -> 21,7 + 13,3). Dedoublonnage
+        # geometrique, sans aucun lexique de noms.
+        dedup = self._merge_ocr_items([], ocr_items, same_text_only=True)
+        if len(dedup) < len(ocr_items):
+            rep.warnings.append(
+                f"Jetons OCR en double : {len(ocr_items) - len(dedup)} "
+                "doublon(s) fusionné(s) avant mesure.")
+            ocr_items = dedup
+            rep.n_ocr_tokens = len(ocr_items)
 
         rep.level = level or self.detect_level(ocr_items) or "RDC"
-        wall_mask = self.wall_mask(img_bgr)
+        texte_boxes = [it["bbox"] for it in ocr_items if it.get("bbox")]
+        wall_mask = self.wall_mask(img_bgr, text_boxes=texte_boxes)
         rep.building_bbox = self.building_bbox(wall_mask)
 
-        labels = self.room_labels(ocr_items, rep.building_bbox, (H, W))
-        dim_tokens = [it for it in ocr_items if is_dimension_token(it["text"])]
-        pair_tokens = [(it, parse_room_dims(it["text"])) for it in ocr_items]
-        pair_tokens = [(it, d) for it, d in pair_tokens if d]
+        def _analyse(items, rebuild_mask=False):
+            """Libelles, cotes, echelle et regions pour un jeu de tokens."""
+            nonlocal wall_mask
+            if rebuild_mask:
+                wall_mask = self.wall_mask(
+                    img_bgr,
+                    text_boxes=[it["bbox"] for it in items if it.get("bbox")])
+                rep.building_bbox = self.building_bbox(wall_mask)
+            lbs = self.room_labels(items, rep.building_bbox, (H, W))
+            dims = [it for it in items if is_dimension_token(it["text"])]
+            pairs = [(it, parse_room_dims(it["text"])) for it in items]
+            pairs = [(it, d) for it, d in pairs if d]
+            sc, cf, est, wr = self.calibrate_scale(
+                dims, rep.building_bbox, (H, W))
+            reg = self.segment_rooms(wall_mask, rep.building_bbox,
+                                     scale_px_per_m=sc)
+            return lbs, dims, pairs, sc, cf, est, wr, reg
 
-        scale, conf, estimates, warns = self.calibrate_scale(
-            dim_tokens, rep.building_bbox, (H, W))
+        (labels, dim_tokens, pair_tokens, scale, conf, estimates, warns,
+         regions) = _analyse(ocr_items)
+
+        # --- OCR renforce : un plan hachure/pointille peut faire perdre des
+        # libelles a l'OCR (DINING lu « DINHNG », BATH 2 lu « BATHE »). Le
+        # signal d'alerte est geometrique : il y a plus de PIECES FERMEES que
+        # de libelles lus. On relit alors une image Debarrassee des traits
+        # longs (murs), ce qui coute un second passage (~8 s) — declenche
+        # uniquement dans ce cas.
+        if from_engine and regions and len(labels) < len(regions):
+            extra = self._ocr_text_pass(img_bgr)
+            merged = self._merge_ocr_items(ocr_items, extra)
+            if [t.get("text") for t in merged] != [t.get("text")
+                                                   for t in ocr_items]:
+                alt = _analyse(merged, rebuild_mask=True)
+                if len(alt[0]) >= len(labels):
+                    avant = len(labels)
+                    ocr_items = merged
+                    rep.n_ocr_tokens = len(ocr_items)
+                    (labels, dim_tokens, pair_tokens, scale, conf, estimates,
+                     warns, regions) = alt
+                    rep.warnings.append(
+                        f"OCR renforcé (traits retirés) : {len(labels) - avant} "
+                        f"libellé(s) récupéré(s) sur {len(regions)} pièce(s) "
+                        f"fermée(s).")
+                else:
+                    rep.warnings.append(
+                        "OCR renforcé tenté (traits retirés) : lecture moins "
+                        "complète, première lecture conservée.")
+
         if rep.building_bbox and (known_width_m or known_height_m):
             bx, by, bw, bh = rep.building_bbox
             manual = []
@@ -388,31 +442,371 @@ class PlanSurfaceExtractor:
                 return m.group(1).upper().replace("  ", " ")
         return None
 
-    @staticmethod
-    def wall_mask(img_bgr, min_wall_px: Optional[int] = None):
-        """Murs = traits epais ; textes et cotes (fins) sont elimines par
-        ouverture morphologique. Le noyau est ADAPTATIF : on part du plus
-        grand et on descend jusqu'a ce qu'une composante murale couvre au
-        moins 25 % de l'image (plans basse resolution : murs de 2-3 px)."""
+    def _ocr_text_pass(self, img_bgr) -> List[Dict[str, Any]]:
+        """Second passage OCR sur une image privee des TRAITS LONGS.
+
+        Sur un plan hachure ou dense en graphics, l'OCR perd ou deforme des
+        libelles (`DINING` -> `DINHNG`, `BATH 2` -> `BATHE`). En retirant les
+        murs (traits longs H/V dilates) et en ne gardant que le texte, la
+        lecture redevient fiable. Cout : un second passage OCR.
+        """
         import cv2
+        import numpy as np
+        if not self.ocr.available:
+            return []
+        ink = self._binarize_ink(img_bgr)
+        H, W = ink.shape[:2]
+        u = max(H, W) / 1600.0
+        L = max(12, int(round(40 * u)))
+        nus = cv2.bitwise_or(
+            cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (L, 1))),
+            cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (1, L))))
+        efface = cv2.dilate(nus, np.ones((5, 5), np.uint8))
+        texte = cv2.bitwise_and(ink, cv2.bitwise_not(efface))
+        # Tesseract attend du texte NOIR sur fond BLANC.
+        texte = cv2.cvtColor(255 - texte, cv2.COLOR_GRAY2BGR)
+        return self.ocr.recognize(texte)
+
+    @staticmethod
+    def _merge_ocr_items(base: Sequence[Dict[str, Any]],
+                         extra: Sequence[Dict[str, Any]],
+                         same_text_only: bool = False
+                         ) -> List[Dict[str, Any]]:
+        """Fusionne deux lectures OCR sans doublon.
+
+        Deux tokens qui se recouvrent fortement (meme zone) designent le meme
+        texte : on garde celui de meilleure confiance. Les autres sont ajoutes.
+
+        ``same_text_only`` : ne fusionne que des tokens de MEME texte. Deux
+        lectures DIFFERENTES au meme endroit (ex. deux cotes hors-tout
+        concurrentes `8.00` / `9.50`) ne sont alors PAS fusionnees : elles
+        doivent rester visibles pour declencher l'alerte de contradiction.
+        """
+        out = [dict(it) for it in base]
+        for it in extra:
+            box = tuple(int(v) for v in it.get("bbox", (0, 0, 0, 0)))
+            aire = max(1, box[2] * box[3])
+            connu = False
+            for i, cur in enumerate(out):
+                cbox = tuple(int(v) for v in cur.get("bbox", (0, 0, 0, 0)))
+                inter = _box_intersection(box, cbox)
+                if inter >= 0.4 * min(aire, max(1, cbox[2] * cbox[3])):
+                    if same_text_only and re.sub(
+                            r"[^A-Z0-9]", "", str(it.get("text", "")).upper()
+                    ) != re.sub(r"[^A-Z0-9]", "",
+                                str(cur.get("text", "")).upper()):
+                        continue
+                    if float(it.get("conf", 0)) > float(cur.get("conf", 0)):
+                        out[i] = dict(it)
+                    connu = True
+                    break
+            if not connu:
+                out.append(dict(it))
+        return out
+
+    @staticmethod
+    def _binarize_ink(img_bgr):
+        """Encre = noir, fond = blanc, meme sur un scan a eclairage inegal.
+
+        Seuillage ADAPTATIF (moyenne locale) plutot que global : un scan
+        photographie ou un degrade de photocopieuse fait echouer Otsu (une
+        moitie du plan devient « encre »). Un garde-fou global (gray > 205)
+        evite que le papier texture ne devienne de l'encre.
+        """
+        import cv2
+        import numpy as np
+        gray = (cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+                if getattr(img_bgr, "ndim", 2) == 3 else img_bgr)
+        H, W = gray.shape[:2]
+        block = int(max(15, min(61, round(max(H, W) / 25)))) | 1
+        ink = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                    cv2.THRESH_BINARY_INV, block, 12)
+        ink[gray > 205] = 0
+        return ink
+
+    @staticmethod
+    def _keep_axis_aligned(mask, min_len_px: int, max_thick_px: int):
+        """Ne garde que les traits LONGS et ORIENTES H ou V.
+
+        Une hachure est longue mais OBLIQUE : sa boite englobante est presque
+        carree, alors qu'un mur (ou son nu) a une boite tres allongee dans un
+        seul axe. C'est ce critere geometrique — et non l'epaisseur — qui
+        separe une hachure d'un mur.
+        """
+        import cv2
+        import numpy as np
+        n, lbl, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        out = np.zeros_like(mask)
+        for i in range(1, n):
+            x = int(stats[i, cv2.CC_STAT_LEFT])
+            y = int(stats[i, cv2.CC_STAT_TOP])
+            w = int(stats[i, cv2.CC_STAT_WIDTH])
+            h = int(stats[i, cv2.CC_STAT_HEIGHT])
+            horizontale = w >= min_len_px and h <= max_thick_px
+            verticale = h >= min_len_px and w <= max_thick_px
+            if horizontale or verticale:
+                out[y:y + h, x:x + w] = np.maximum(
+                    out[y:y + h, x:x + w], lbl[y:y + h, x:x + w] > 0)
+        return out
+
+    @staticmethod
+    def _link_dot_chains(points, thickness: int, min_len: int,
+                         max_gap: int, tol: int, min_dots: int = 4):
+        """Reconstruit les murs POINTILLES a partir des centres de points.
+
+        Une fermeture morphologique fusionne les points d'un mur avec ceux des
+        murs voisins : le reseau obtenu a une boite englobante carree et tout
+        filtre d'elongation le rejette. On relie donc les points UN PAR UN,
+        uniquement s'ils sont alignes (H ou V), proches (``max_gap``) et assez
+        nombreux (``min_dots``) — une hachure ou un texte isole ne peut pas
+        former une telle chaine.
+
+        Retourne un masque de segments (epaisseur ``thickness``).
+        """
+        import cv2
+        import numpy as np
+        n, _lbl, _stats, cents = cv2.connectedComponentsWithStats(points, 8)
+        pts = [(float(cents[i][0]), float(cents[i][1])) for i in range(1, n)]
+        out = np.zeros_like(points)
+        if len(pts) < min_dots:
+            return out
+
+        def _flush(group, vertical: bool):
+            if len(group) < min_dots:
+                return
+            group.sort(key=lambda p: p[1] if vertical else p[0])
+            span = abs((group[-1][1] if vertical else group[-1][0])
+                       - (group[0][1] if vertical else group[0][0]))
+            if span < min_len:
+                return
+            moy = sum(p[0] if vertical else p[1] for p in group) / len(group)
+            if vertical:
+                p1 = (int(round(moy)), int(max(0, group[0][1])))
+                p2 = (int(round(moy)), int(group[-1][1]))
+            else:
+                p1 = (int(max(0, group[0][0])), int(round(moy)))
+                p2 = (int(group[-1][0]), int(round(moy)))
+            cv2.line(out, p1, p2, 255, thickness)
+
+        for vertical in (False, True):
+            # H : on balaie par y croissant ; V : par x croissant
+            pts_sorted = sorted(pts, key=lambda p: (p[1], p[0]) if not vertical
+                                else (p[0], p[1]))
+            groupe: list = []
+            for p in pts_sorted:
+                if not groupe:
+                    groupe = [p]
+                    continue
+                moy = sum(q[1] if not vertical else q[0]
+                          for q in groupe) / len(groupe)
+                ecart = abs((p[1] if not vertical else p[0]) - moy)
+                avance = ((p[0] - groupe[-1][0]) if not vertical
+                          else (p[1] - groupe[-1][1]))
+                if ecart <= tol and 0 <= avance <= max_gap:
+                    groupe.append(p)
+                else:
+                    _flush(groupe, vertical)
+                    groupe = [p]
+            _flush(groupe, vertical)
+        return out
+
+    @staticmethod
+    def _estimate_band_gap(nu_h, nu_v, fallback: int = 9,
+                           lo: int = 3, hi: int = 41, cap: Optional[int] = None) -> int:
+        """Ecart entre deux nus paralleles = epaisseur du mur, en pixels.
+
+        Mesure faite SUR LE DOCUMENT, pas sur la resolution de l'image : on
+        releve la distance entre nus successifs dans chaque colonne (nus
+        horizontaux) et dans chaque ligne (nus verticaux).
+
+        Garde-fous, parce que le MOBILIER produit aussi des paires de lignes
+        paralleles proches (contour d'un lit, d'un placard), souvent plus
+        frequentes que les vrais murs :
+        - on ne retient que le PLUS PETIT pas a fort support (les murs en
+          double trait sont plus fins que les contours de mobilier) ;
+        - le pas doit rester inferieur a `cap` (epaisseur de mur plausible,
+          ~0,35 m a l'echelle du plan) : un contour de lit de 26 px n'est pas
+          un mur et ne doit jamais elargir la fermeture de bande.
+
+        Sans pas valide, on retombe sur la valeur de repli, liee a la taille
+        de l'image.
+        """
+        import numpy as np
+        vals = []
+        for mask, axis in ((nu_h, 0), (nu_v, 1)):
+            if mask is None or getattr(mask, "ndim", 0) != 2 or not mask.any():
+                continue
+            m = mask > 0
+            sub = m[:, ::2] if axis == 0 else m[::2, :]
+            for i in range(sub.shape[1 - axis]):
+                line = sub[:, i] if axis == 0 else sub[i, :]
+                pos = np.flatnonzero(line)
+                if pos.size > 1:
+                    d = np.diff(pos)
+                    vals.append(d[(d >= lo) & (d <= hi)])
+        if not vals:
+            return fallback
+        allv = np.concatenate(vals)
+        if allv.size < 25:
+            return fallback
+        counts = np.bincount(allv, minlength=hi + 1)
+        if cap is None:
+            cap = hi
+        seuil = max(25, int(0.15 * allv.size))
+        # plus petit pas a fort support, borne par l'epaisseur de mur max
+        for g in range(lo, min(cap, hi) + 1):
+            if counts[g] >= seuil:
+                gg = g + 2
+                if gg % 2 == 0:
+                    gg += 1
+                return int(max(3, min(gg, hi + 2)))
+        return fallback
+
+    @staticmethod
+    def wall_mask(img_bgr, min_wall_px: Optional[int] = None,
+                  text_boxes: Optional[Sequence[Sequence[int]]] = None):
+        """Murs = structures LONGUES, EPAISSES et CONTINUES.
+
+        Un plan reel ne dessine pas toujours les murs en aplat noir :
+        - murs en **poche hachuree** (deux nus + hachures a 45 deg) ;
+        - murs en **double trait** (deux nus, vide entre eux) ;
+        - murs **pointilles** ou en tirets.
+        Un simple seuillage + ouverture ne voit dans ces cas qu'une fine
+        ligne (ou rien) et la piece n'est plus fermee.
+
+        Pipeline :
+          1. binarisation adaptative (cf. `_binarize_ink`) ;
+          2. **murs pleins** : ouverture -> les hachures fines disparaissent ;
+          3. **traits longs H/V** : fermeture directionnelle (recolle les
+             pointilles), puis filtrage geometrique (`_keep_axis_aligned`) qui
+             elimine les hachures obliques et le parquet ;
+          4. **bandes** : fermeture perpendiculaire -> elle remplit le vide
+             entre les deux nus d'un mur creux et la poche hachuree ;
+          5. fusion, puis suppression des ilots non muraux.
+        """
+        import cv2
+        import numpy as np
         H, W = img_bgr.shape[:2]
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        if min_wall_px:
-            ks = [min_wall_px]
-        else:
-            k0 = max(3, int(round(max(H, W) * 0.004)))
-            ks = list(range(k0, 1, -1))
-        walls = dark
-        for k in ks:
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-            walls = cv2.morphologyEx(dark, cv2.MORPH_OPEN, kernel)
-            n, _, stats, _ = cv2.connectedComponentsWithStats(walls, 8)
-            if n > 1 and max(max(stats[i, cv2.CC_STAT_WIDTH] / W,
-                                 stats[i, cv2.CC_STAT_HEIGHT] / H)
-                             for i in range(1, n)) >= 0.25:
-                break
-        return walls
+        u = max(H, W) / 1600.0          # facteur d'echelle (plans 900..3000 px)
+        Lmin = max(12, int(round(40 * u)))    # longueur mini d'un trait de mur
+        Lgap = max(7, int(round(14 * u)))     # espace max entre deux pointilles
+
+        ink = PlanSurfaceExtractor._binarize_ink(img_bgr)
+
+        # --- 2. murs pleins (aplat noir) ------------------------------------
+        k = max(3, int(round((min_wall_px or 3 * u))) | 1)
+        plein = cv2.morphologyEx(
+            ink, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+
+        # --- 3. nus de murs : traits LONGS et ORIENTES H ou V ---------------
+        # Ouverture (et non fermeture) : une hachure oblique ne contient aucun
+        # segment horizontal de Lmin px, elle disparait donc ici — contrairement
+        # a une fermeture qui la fusionnerait avec ses voisines.
+        nu_h = cv2.morphologyEx(
+            ink, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (Lmin, 1)))
+        nu_v = cv2.morphologyEx(
+            ink, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (1, Lmin)))
+        nus = cv2.bitwise_or(nu_h, nu_v)
+
+        # --- 3 bis. epaisseur de mur MESUREE sur le document ----------------
+        # L'ecart entre deux nus paralleles est l'epaisseur reelle du mur
+        # dessine. On ne le deduit pas de la resolution : un plan peut etre
+        # 900 px ou 3000 px de large avec la meme epaisseur relative, et deux
+        # bureaux d'etudes n'utilisent pas la meme plume. Noyau IMPAIR
+        # obligatoire : une fermeture de taille paire epaissit les traits de
+        # 1 px (asymetrie d'ancre OpenCV), ce qui laisse survivre le mobilier
+        # filaire et decoupe les pieces.
+        G = PlanSurfaceExtractor._estimate_band_gap(
+            nu_h, nu_v, fallback=max(5, int(round(9 * u))),
+            cap=max(12, int(round(22 * u))))
+        if G % 2 == 0:
+            G += 1
+
+        # --- 4. murs pointilles / en tirets ---------------------------------
+        # On retire les nus, on ne garde que de PETITS elements (les points),
+        # puis on les recolle SEULEMENT s'ils s'alignent en H ou en V : les
+        # points d'un mur s'alignent, les hachures obliques non.
+        reste = cv2.bitwise_and(
+            ink, cv2.bitwise_not(cv2.dilate(nus, np.ones((2 * k + 1,) * 2,
+                                                         np.uint8))))
+        taille_max = max(8, int(round(9 * u)))
+        n, lbl, stats, _ = cv2.connectedComponentsWithStats(reste, 8)
+        points = np.zeros_like(ink)
+        for i in range(1, n):
+            x = int(stats[i, cv2.CC_STAT_LEFT])
+            y = int(stats[i, cv2.CC_STAT_TOP])
+            w = int(stats[i, cv2.CC_STAT_WIDTH])
+            h = int(stats[i, cv2.CC_STAT_HEIGHT])
+            if w <= taille_max and h <= taille_max:
+                points[y:y + h, x:x + w] = np.maximum(
+                    points[y:y + h, x:x + w],
+                    (lbl[y:y + h, x:x + w] == i).astype(np.uint8))
+        # Les points sont relies SEULEMENT s'ils sont alignes, proches et
+        # assez nombreux (cf. `_link_dot_chains`).
+        pointilles = PlanSurfaceExtractor._link_dot_chains(
+            points, thickness=k, min_len=Lmin,
+            max_gap=max(Lgap, int(round(16 * u))),
+            tol=max(2, int(round(2.5 * u))))
+
+        traits = cv2.bitwise_or(nus, cv2.dilate(
+            pointilles, np.ones((k, k), np.uint8)))
+
+        # --- 5. bandes : remplir le vide entre deux nus paralleles ----------
+        # Ecart max comble = G px (~0,43 m a 21 px/m) : epaisseur d'un mur
+        # courant, tres inferieur a une piece ou a un couloir.
+        bandes = cv2.bitwise_or(
+            cv2.morphologyEx(traits, cv2.MORPH_CLOSE,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (1, G))),
+            cv2.morphologyEx(traits, cv2.MORPH_CLOSE,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (G, 1))))
+
+        walls = cv2.bitwise_or(plein, bandes)
+
+        # --- 5 bis. les LIBELLES ne sont pas des murs -----------------------
+        # Un mot est un ilot compact a faible remplissage ; ses lettres
+        # courtes traversent l'ouverture et, reliees par la fermeture de
+        # bande, forment une barre qui coupe la piece en deux (mesure :
+        # SALON -41 %, CUISINE -56 % sur un plan 12 px/m). On retire l'encre
+        # situee dans les boites de texte, SAUF ce qui appartient deja a un
+        # mur long (nus) : un libelle colle a une cloison ne perce donc pas
+        # le mur. Aucune regle sur le NOM des pieces.
+        if text_boxes:
+            txt = np.zeros(walls.shape, np.uint8)
+            for box in text_boxes:
+                x, y, bw, bh = (int(v) for v in box[:4])
+                if bw <= 0 or bh <= 0:
+                    continue
+                marge = max(2, int(round(1.5 * u)))
+                x0, y0 = max(0, x - marge), max(0, y - marge)
+                x1 = min(walls.shape[1], x + bw + marge)
+                y1 = min(walls.shape[0], y + bh + marge)
+                txt[y0:y1, x0:x1] = 255
+            protege = cv2.dilate(traits, np.ones((2 * k + 1,) * 2, np.uint8))
+            walls = cv2.bitwise_and(walls, cv2.bitwise_not(
+                cv2.bitwise_and(txt, cv2.bitwise_not(protege))))
+
+        # --- 5. nettoyage : ilots courts et fins ---------------------------
+        walls = cv2.morphologyEx(
+            walls, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)))
+        n, lbl, stats, _ = cv2.connectedComponentsWithStats(walls, 8)
+        garde = np.zeros_like(walls)
+        aire_min = (6 * u) ** 2
+        for i in range(1, n):
+            x, y = int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP])
+            w, h = int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            long_seg = max(w, h) >= max(10, int(round(28 * u)))
+            if long_seg or area >= aire_min:
+                garde[stats[i, cv2.CC_STAT_TOP]:y + h,
+                      x:x + w] = np.maximum(
+                    garde[y:y + h, x:x + w], (lbl[y:y + h, x:x + w] == i))
+        return (garde * 255).astype(np.uint8)
 
     @staticmethod
     def _normalize_polarity(img_bgr):
@@ -919,11 +1313,39 @@ class PlanSurfaceExtractor:
             if rg is not None:
                 labels_in_region.setdefault(rg["id"], []).append(li)
 
+        # Un MEME libelle ecrit deux fois dans une meme region (grande piece en
+        # L, piece traversante, libelle repete pour lisibilite) ne doit pas
+        # produire deux lignes : la region est exclusive et mesuree une fois.
+        # Deux libelles DIFFERENTS dans une region restent, eux, un espace
+        # ouvert partage (cf. `shared` plus bas).
+        doublon: Dict[int, int] = {}
+        for _rid, lis in labels_in_region.items():
+            par_nom: Dict[str, int] = {}
+            for li in lis:
+                nom = re.sub(r"[^A-Z0-9]", "", labels[li]["text"].upper())
+                if nom in par_nom:
+                    garde = par_nom[nom]
+                    if float(labels[li]["conf"]) > float(labels[garde]["conf"]):
+                        par_nom[nom] = li
+                        doublon[garde] = li
+                    else:
+                        doublon[li] = par_nom[nom]
+                else:
+                    par_nom[nom] = li
+        if doublon:
+            labels_in_region = {
+                rid: [li for li in lis if li not in doublon]
+                for rid, lis in labels_in_region.items()}
+
         boxes = {b["label_index"]: b
                  for b in self.room_boxes(wall_mask, labels, bbox)}
         env_rooms: List[RoomSurface] = []
+        room_of_label: Dict[int, RoomSurface] = {}
+        region_of_room: Dict[int, Dict[str, Any]] = {}
 
         for li, lb in enumerate(labels):
+            if li in doublon:
+                continue                      # libelle repete dans la meme piece
             room = RoomSurface(label=lb["text"].upper(), level=level,
                                bbox=tuple(int(v) for v in lb["bbox"]),
                                confidence=lb["conf"])
@@ -972,6 +1394,7 @@ class PlanSurfaceExtractor:
                 # donc exacte meme pour une piece en L (la boite ancree, elle,
                 # la surestimerait). La boite ne sert plus que de controle.
                 room.area_segmented_m2 = seg_area
+                region_of_room[id(room)] = region
                 room.perimeter_m = round(region["perimeter_px"] / scale, 2)
                 _rx, _ry, _rw, _rh = region["bbox"]
                 room.width_m, room.length_m = sorted(
@@ -1039,6 +1462,7 @@ class PlanSurfaceExtractor:
                     "Surface NON TROUVEE : piece non fermee, ni cote 'L x l' "
                     "ni echelle exploitable.")
             rooms.append(room)
+            room_of_label[li] = room
 
         # Regions partagees (ouverture large, plan libre) : la surface de la
         # region est la seule mesure fiable. On repartit cette surface entre
@@ -1051,19 +1475,21 @@ class PlanSurfaceExtractor:
                     continue
                 region = next(r for r in regions if r["id"] == rid)
                 seg = region["area_px"] / (scale ** 2)
-                indiv = [rooms[j].area_segmented_m2 for j in lis]
+                indiv = [room_of_label[j].area_segmented_m2 for j in lis
+                         if j in room_of_label]
                 if any(v is None for v in indiv) or sum(indiv) <= 0:
                     continue
                 total = float(sum(indiv))
                 if abs(total - seg) / max(seg, 1e-6) <= 0.02:
                     continue
                 factor = seg / total
-                for j, v in zip(lis, indiv):
-                    rooms[j].area_segmented_m2 = round(v * factor, 2)
-                    if rooms[j].perimeter_m:
-                        rooms[j].perimeter_m = round(
-                            rooms[j].perimeter_m * math.sqrt(factor), 2)
-                    rooms[j].warnings.append(
+                for j, v in zip([j for j in lis if j in room_of_label], indiv):
+                    room_of_label[j].area_segmented_m2 = round(v * factor, 2)
+                    if room_of_label[j].perimeter_m:
+                        room_of_label[j].perimeter_m = round(
+                            room_of_label[j].perimeter_m
+                            * math.sqrt(factor), 2)
+                    room_of_label[j].warnings.append(
                         f"Region partagee {seg:.2f} m² repartie au prorata des "
                         f"pieces mesurees (facteur {factor:.3f}) : la somme "
                         f"egale la surface de la region.")
@@ -1076,12 +1502,15 @@ class PlanSurfaceExtractor:
                     continue
                 region = next(r for r in regions if r["id"] == rid)
                 seg = region["area_px"] / (scale ** 2)
-                explicit = sum(rooms[j].area_explicit_m2 or 0.0 for j in lis)
-                measured = sum(rooms[j].area_segmented_m2 or 0.0 for j in lis)
+                explicit = sum(room_of_label[j].area_explicit_m2 or 0.0
+                               for j in lis if j in room_of_label)
+                measured = sum(room_of_label[j].area_segmented_m2 or 0.0
+                               for j in lis if j in room_of_label)
                 residual = round(seg - explicit - measured, 2)
                 # Toutes les pieces de la zone sont mesurees : la ligne de
                 # zone ferait doublon.
-                if all(rooms[j].area_m2 for j in lis) or residual < 0.5:
+                if all(room_of_label[j].area_m2 for j in lis
+                       if j in room_of_label) or residual < 0.5:
                     continue
                 names = " + ".join(labels[j]["text"].upper() for j in lis)
                 zone = RoomSurface(
@@ -1097,9 +1526,12 @@ class PlanSurfaceExtractor:
                     f"= {residual:.2f} m².")
                 rooms.append(zone)
 
-        # Anti double comptage : deux boites qui se recouvrent (faux libelle
-        # scinde, placard dans une chambre) -> on retire l'intersection de la
-        # plus petite et on trace l'ajustement.
+        # Anti double comptage : deux MESURES qui se recouvrent reellement
+        # (faux libelle scinde, placard dans une chambre) -> on retire
+        # l'intersection de la plus petite et on trace l'ajustement.
+        # Attention : deux regions segmentees DISTINCTES sont disjointes par
+        # construction ; comparer leurs boites englobantes effacait la piece
+        # voisine (CUISINE 7,3 m2 -> 0,0 m2 sous la boite du SALON en L).
         for i, a in enumerate(rooms):
             for b in rooms[i + 1:]:
                 # Les mesures bornees par l'enveloppe se recouvrent par
@@ -1109,20 +1541,32 @@ class PlanSurfaceExtractor:
                     continue
                 if not (a.area_segmented_m2 and b.area_segmented_m2):
                     continue
-                if not (a.region_bbox and b.region_bbox):
-                    continue
-                inter = _box_intersection(a.region_bbox, b.region_bbox)
-                if inter <= 0:
-                    continue
+                ra, rb = region_of_room.get(id(a)), region_of_room.get(id(b))
+                if ra is not None and rb is not None:
+                    if ra["id"] == rb["id"]:
+                        continue          # meme region : deja reparti au prorata
+                    inter_px = int(np.count_nonzero(
+                        np.logical_and(ra["mask"] > 0, rb["mask"] > 0)))
+                    if inter_px <= 0:
+                        continue          # regions disjointes : faux positif
+                    inter = inter_px
+                    inter_area = inter_px / (scale ** 2)
+                else:
+                    if not (a.region_bbox and b.region_bbox):
+                        continue
+                    inter = _box_intersection(a.region_bbox, b.region_bbox)
+                    if inter <= 0:
+                        continue
+                    inter_area = inter / (scale ** 2)
                 small, big = (a, b) if a.area_segmented_m2 <= b.area_segmented_m2 else (b, a)
                 share = inter / max(
                     small.region_bbox[2] * small.region_bbox[3], 1)
                 if share < 0.15:
                     continue
                 small.area_segmented_m2 = round(
-                    max(0.0, small.area_segmented_m2 - inter / (scale ** 2)), 2)
+                    max(0.0, small.area_segmented_m2 - inter_area), 2)
                 small.warnings.append(
-                    f"Recouvrement avec « {big.label} » : {inter / (scale ** 2):.2f} m² "
+                    f"Recouvrement avec « {big.label} » : {inter_area:.2f} m² "
                     f"retires pour eviter un double comptage.")
         return rooms
 

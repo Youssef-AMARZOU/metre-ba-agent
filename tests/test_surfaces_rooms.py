@@ -286,3 +286,123 @@ def test_bruit_sel_poivre_debruite_et_pieces_mesurees():
     assert rep.scale_px_per_m == pytest.approx(100.0, rel=0.05)
     for r in _by_label(rep).values():
         assert r.area_m2 == pytest.approx(30.0, rel=0.10)
+
+
+# ---------------------------------------------------------------------------
+# 10) Murs en DOUBLE TRAIT (deux nus paralleles, interieur blanc)
+#     Un plan vectoriel dessine souvent les murs ainsi, et non en aplat : sans
+#     reconstruction des bandes, la piece n'est pas fermee et n'a pas de surface.
+# ---------------------------------------------------------------------------
+def _blank_double(w_m: float, h_m: float, gap: int = 5, thick: int = 3):
+    img = np.full((int(h_m * S) + 2 * OY + 200,
+                   int(w_m * S) + 2 * OX + 200, 3), 255, np.uint8)
+    for d in (0, gap):
+        cv2.rectangle(img, (OX + d, OY + d),
+                      (OX + int(w_m * S) - d, OY + int(h_m * S) - d),
+                      (0, 0, 0), thick)
+    return img
+
+
+def _wall_double(img, x0, y0, x1, y1, gap=5, thick=3):
+    """Cloison en double trait : deux nus paralleles separes de ``gap`` px."""
+    for d in (0, gap):
+        dx = d if x0 == x1 else 0
+        dy = d if y0 == y1 else 0
+        cv2.line(img, (OX + int(x0 * S) + dx, OY + int(y0 * S) + dy),
+                 (OX + int(x1 * S) + dx, OY + int(y1 * S) + dy),
+                 (0, 0, 0), thick)
+
+
+def test_murs_double_trait_mesures():
+    img = _blank_double(10, 6)
+    _wall_double(img, 5, 0, 5, 6)
+    ocr = [_label("SALON", 2.5, 3.0), _label("CUISINE", 7.5, 3.0, w=120)]
+    ocr += _cotes(10, 6)
+    rep = PlanSurfaceExtractor().extract_from_image(img, ocr_items=ocr)
+
+    assert rep.scale_px_per_m == pytest.approx(100.0, rel=0.05)
+    rooms = _by_label(rep)
+    assert set(rooms) == {"SALON", "CUISINE"}, (
+        "murs en double trait non refermes : %s" % sorted(rooms))
+    for r in rooms.values():
+        assert r.area_m2 == pytest.approx(30.0, rel=0.15)
+
+
+# ---------------------------------------------------------------------------
+# 11) Murs POINTILLES (tirets/points) : reconstruction des chaines de points
+# ---------------------------------------------------------------------------
+def _dotted_line(img, x0, y0, x1, y1, step=12, r=2):
+    n = max(2, int(np.hypot(x1 - x0, y1 - y0) / step) + 1)
+    for t in np.linspace(0.0, 1.0, n):
+        cv2.circle(img, (int(round(x0 + t * (x1 - x0))),
+                         int(round(y0 + t * (y1 - y0)))), r, (0, 0, 0), -1)
+
+
+def test_murs_pointilles_reconstruits():
+    img = np.full((int(6 * S) + 2 * OY + 200, int(10 * S) + 2 * OX + 200, 3),
+                  255, np.uint8)
+    x0, y0 = OX, OY
+    x1, y1 = OX + int(10 * S), OY + int(6 * S)
+    for a, b in (((x0, y0), (x1, y0)), ((x0, y1), (x1, y1)),
+                 ((x0, y0), (x0, y1)), ((x1, y0), (x1, y1)),
+                 ((OX + 5 * S, y0), (OX + 5 * S, y1))):
+        _dotted_line(img, a[0], a[1], b[0], b[1])
+
+    ocr = [_label("SALON", 2.5, 3.0), _label("CUISINE", 7.5, 3.0, w=120)]
+    ocr += _cotes(10, 6)
+    rep = PlanSurfaceExtractor().extract_from_image(img, ocr_items=ocr)
+
+    assert rep.scale_px_per_m == pytest.approx(100.0, rel=0.05)
+    rooms = _by_label(rep)
+    assert set(rooms) == {"SALON", "CUISINE"}, (
+        "murs pointilles non reconstruits : %s" % sorted(rooms))
+    for r in rooms.values():
+        assert r.area_m2 == pytest.approx(30.0, rel=0.18)
+
+
+# ---------------------------------------------------------------------------
+# 12) Hachures obliques et mobilier fin : ni mur, ni piece
+#     Une hachure a 45 degres a une boite englobante quasi carree ; un mur est
+#     allonge dans un seul axe. C'est ce tri geometrique qui les separe.
+# ---------------------------------------------------------------------------
+def test_hachures_obliques_et_mobilier_fin_ne_sont_pas_des_murs():
+    img = _blank(10, 6)
+    _wall(img, 5, 0, 5, 6)
+    # Hachures obliques a 45 degres dans SALON (comme un sol carrele)
+    for k in range(0, 500, 12):
+        cv2.line(img, (OX + 40 + k, OY + 40), (OX + 40, OY + 40 + k), (0, 0, 0), 1)
+    # Mobilier fin : rectangle 1 px (lit, placard) dans CUISINE
+    cv2.rectangle(img, (OX + 620, OY + 300), (OX + 850, OY + 480),
+                  (0, 0, 0), 1)
+
+    ocr = [_label("SALON", 2.5, 3.0), _label("CUISINE", 7.5, 3.0, w=120)]
+    ocr += _cotes(10, 6)
+    rep = PlanSurfaceExtractor().extract_from_image(img, ocr_items=ocr)
+
+    rooms = _by_label(rep)
+    assert set(rooms) == {"SALON", "CUISINE"}, (
+        "hachures/mobilier pris pour des murs : %s" % sorted(rooms))
+    for r in rooms.values():
+        assert r.area_m2 == pytest.approx(30.0, rel=0.15)
+
+
+# ---------------------------------------------------------------------------
+# 13) Piece en L ADJACENTE a un rectangle : pas de double comptage
+#     La boite englobante du L recouvre la piece voisine ; l'anti-double-
+#     comptage par boite effacait la voisine (CUISINE -> 0 m2). Les regions
+#     segmentees etant disjointes, chaque piece doit etre mesuree pleinement.
+# ---------------------------------------------------------------------------
+def test_piece_en_l_adjacente_pas_de_double_compte():
+    img = _blank(6, 6)                   # enceinte 6 x 6 m
+    _wall(img, 4, 4, 4, 6)               # cloison verticale (bas droite)
+    _wall(img, 4, 4, 6, 4)               # cloison horizontale (bas droite)
+    ocr = ([_label("SALON", 2.0, 2.5), _label("CUISINE", 5.0, 5.0, w=120)]
+           + _cotes(6, 6))
+    rep = PlanSurfaceExtractor().extract_from_image(img, ocr_items=ocr)
+
+    rooms = _by_label(rep)
+    assert set(rooms) == {"SALON", "CUISINE"}
+    # SALON en L = 6x6 - 2x2 = 32 m2 ; CUISINE = 2x2 = 4 m2 (net, murs deduits)
+    assert rooms["SALON"].area_m2 == pytest.approx(32.0, rel=0.12)
+    assert rooms["CUISINE"].area_m2 == pytest.approx(4.0, rel=0.30)
+    assert rooms["CUISINE"].area_m2 > 0.5, "CUISINE effacee par le double comptage"
