@@ -46,12 +46,13 @@ def main() -> int:
                    str(CPP), f"/Fe:{out}"]
         else:
             out = out_dir / "fastwall.dll"
-            cmd = [path, "-O3", "-std=c++17", "-shared",
-                   "-o", str(out), str(CPP)]
+            cmd = [path, "-O3", "-std=c++17", "-static", "-static-libgcc",
+                   "-static-libstdc++", "-shared", "-o", str(out), str(CPP)]
     else:
         out = out_dir / "libfastwall.so"
         cmd = [path, "-O3", "-march=native", "-ffast-math", "-std=c++17",
-               "-shared", "-fPIC", "-o", str(out), str(CPP)]
+               "-static-libgcc", "-static-libstdc++", "-shared", "-fPIC",
+               "-o", str(out), str(CPP)]
 
     print("[fast_wall] ", " ".join(str(c) for c in cmd))
     res = subprocess.run(cmd, cwd=str(ROOT))

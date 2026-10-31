@@ -7,6 +7,11 @@ dist/
 build/
 templates/
 *.spec
+# Noyau natif compilé (régénérable : scripts/build_fast_wall.py)
+extractors/fastwall.dll
+extractors/fastwall.so
+extractors/libfastwall.so
+extractors/libfastwall.dylib
 # Packages de diffusion (trop lourds pour GitHub, distribués à part)
 PlanBA_Metre_Extractor*.zip
 deployment/

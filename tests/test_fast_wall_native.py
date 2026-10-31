@@ -92,7 +92,8 @@ def test_reconstruct_dotted_line_parite_natif_python():
 
 
 def test_estimate_stroke_width_roi_plausible():
-    # Lignes épaisses de 5 px (horizontale + verticale) : largeur attendue ≈ 4 px
+    # NB : cv2.line(thickness=T) dessine en réalité 2T-1 px (diamant LINE_8) ;
+    # pour T=5 le trait réel fait 7 px. La formule native 2*EDT-1 le restitue.
     img = np.zeros((300, 400), np.uint8)
     cv2.line(img, (50, 150), (350, 150), 255, 5)
     cv2.line(img, (200, 50), (200, 250), 255, 5)
@@ -100,18 +101,18 @@ def test_estimate_stroke_width_roi_plausible():
     res = estimate_stroke_width_fast(_lib, img, use_pure_cpp_thinning=True)
     assert res["confidence"] == "candidate"
     assert res["samples"] >= 30
-    assert 3.0 <= res["width_px"] <= 5.5
+    assert res["width_px"] == pytest.approx(7.0, abs=1.5)
     # Les quartiles encadrent la médiane
     assert res["width_q25"] <= res["width_px"] <= res["width_q75"]
 
 
 def test_estimate_stroke_width_fused_plausible():
     img = np.zeros((300, 400), np.uint8)
-    cv2.line(img, (50, 150), (350, 150), 255, 5)
+    cv2.line(img, (50, 150), (350, 150), 255, 5)   # 7 px réels
     res = estimate_stroke_width_fast(_lib, img, use_pure_cpp_thinning=False)
     # Sur une machine sans opencv-contrib, bascule automatiquement sur le ROI
     if res["confidence"] == "candidate":
-        assert 3.0 <= res["width_px"] <= 5.5
+        assert res["width_px"] == pytest.approx(7.0, abs=1.5)
     else:
         assert res["width_px"] is None
 

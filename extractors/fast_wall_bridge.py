@@ -184,9 +184,14 @@ def build_and_load_fast_wall(cpp_path=None) -> ctypes.CDLL:
                     "Aucun compilateur C++ (g++, clang++, cl) détecté dans le "
                     "PATH : impossible de compiler fast_wall_core.cpp. Le "
                     "pipeline reste en Python pur.")
+            # Liaison statique des runtimes C++/gcc : la DLL produite est
+            # autonome (aucune dépendance à libstdc++-6.dll / libwinpthread-1.dll).
+            static_flags = (["-static", "-static-libgcc", "-static-libstdc++"]
+                            if is_windows
+                            else ["-static-libgcc", "-static-libstdc++"])
             cmd = [compiler, "-O3", "-march=native", "-ffast-math",
-                   "-std=c++17", "-shared", "-fPIC", str(src_file),
-                   "-o", str(lib_file)]
+                   "-std=c++17", *static_flags, "-shared", "-fPIC",
+                   str(src_file), "-o", str(lib_file)]
         subprocess.run(cmd, check=True)
 
     return _bind_all(ctypes.CDLL(str(lib_file)))
