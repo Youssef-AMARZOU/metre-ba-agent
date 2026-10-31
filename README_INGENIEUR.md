@@ -254,6 +254,7 @@ Algorithme **First-Fit Decreasing** par diamètre : les longueurs développées 
 ```bash
 python scripts/build_fast_wall.py     # compilation manuelle (facultative)
 python scripts/verify_fast_wall.py    # smoke test de bout en bout (skip sans compilateur)
+python scripts/install_compiler.py    # (Windows) installe MinGW-w64 g++ via winget/choco
 ```
 
 Parité native/Python vérifiée par `tests/test_fast_wall_native.py` (skips si la DLL est absente).
@@ -321,6 +322,7 @@ pip install -r requirements.txt
 python -m pytest tests -q                       # ~280 tests (Excel COM requis pour le recalcul réel, sinon skip)
 python assets/make_branding.py                  # icône .ico multi-tailles + splash depuis assets/app_icon_source.png
 python build_executable.py                      # dist/PlanBA_Metre_Extractor/ (onedir, windowed, icône)
+python scripts/install_compiler.py              # (optionnel) installe MinGW-w64 g++ (winget/choco)
 python scripts/build_fast_wall.py               # (optionnel) compile le noyau C++ -> extractors/fastwall.dll
 python scripts/verify_fast_wall.py              # (optionnel) vérifie les 4 étages du noyau natif
 ```
