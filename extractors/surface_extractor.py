@@ -747,7 +747,11 @@ class PlanSurfaceExtractor:
                     points[y:y + h, x:x + w],
                     (lbl[y:y + h, x:x + w] == i).astype(np.uint8))
         # Les points sont relies SEULEMENT s'ils sont alignes, proches et
-        # assez nombreux (cf. `_link_dot_chains`).
+        # assez nombreux (cf. `_link_dot_chains`). Sur les plans orthogonaux,
+        # cette chaîne H/V déterministe reste la meilleure option mesurée :
+        # la reconstruction RANSAC générique (extractors/dotted_walls.py) est
+        # disponible en OPT-IN pour les pointillés OBLIQUES, mais elle régresse
+        # les plans H/V (faux segments sur les hachures/mobilier).
         pointilles = PlanSurfaceExtractor._link_dot_chains(
             points, thickness=k, min_len=Lmin,
             max_gap=max(Lgap, int(round(16 * u))),

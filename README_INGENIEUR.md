@@ -46,6 +46,7 @@ Sommaire
 | Rapports | **reportlab** | PDF d'audit et note de calculs |
 | Interface | **customtkinter** (Tk), tkinterdnd2 | Application bureau, thème génie civil |
 | Packaging | **PyInstaller** (`--onedir --windowed --icon`) | Exécutable Windows autonome (~410 Mo) |
+| Natif (optionnel) | **C++17** (noyau `fast_wall_core.cpp`, pont ctypes `fast_wall_bridge.py`) | Boucles critiques (épaisseur de trait, RANSAC pointillés, appariement double trait) accélérées par pointeurs, avec repli Python pur |
 | Tests | **pytest**, Excel COM (pywin32) | 280+ tests dont recalcul réel des formules par Excel |
 
 ---
@@ -108,6 +109,9 @@ metre-ba-agent/
 ├── extractors/
 │   ├── vision_extractor.py        # Computer Vision hybride (PlanBAVisionExtractor)
 │   ├── surface_extractor.py       # Métré des surfaces (PlanSurfaceExtractor)
+│   ├── dotted_walls.py            # Murs pointillés « Hough/RANSAC » (opt-in, obliques)
+│   ├── fast_wall_core.cpp         # Noyau C++17 des boucles critiques (optionnel)
+│   ├── fast_wall_bridge.py        # Pont ctypes + compilation automatique
 │   ├── ocr_router.py              # Routeur OCR local
 │   └── vlm_router.py              # Routeur VLM OpenAI-compatible (Ollama / Groq)
 ├── assets/                        # app_icon.ico/png, splash.png, make_branding.py
@@ -228,6 +232,32 @@ Algorithme **First-Fit Decreasing** par diamètre : les longueurs développées 
 6. **Surface retenue** : cote explicite $L \times l$ si présente (prioritaire), sinon $\text{aire}_{px}/s^2$ ; périmètre $= \text{arcLength}/s$. Régions partagées par plusieurs libellés → ligne **ZONE OUVERTE** $= \text{aire segmentée} - \sum \text{cotes explicites}$ (aucun double comptage). Région $< 3$ m² → « région suspecte », confiance ÷ 2.
 7. **Second œuvre** (`core/surface_metre_excel.py`) : sol $=\sum S$, plinthes $=\sum P$, enduit et peinture $=\sum P \times HSP$, plafond $=\sum S$.
 
+### 7.1 Murs pointillés / double trait — deux stratégies
+
+- **Chemin par défaut** (`_link_dot_chains` dans `surface_extractor.py`) : chaîne H/V déterministe. C'est la meilleure option **mesurée** sur les plans orthogonaux (plan A 10/10, plan B 5/6).
+- **Opt-in `extractors/dotted_walls.py`** : « Hough propose / RANSAC valide » (ajustement orthogonal analytique, pas de sklearn), avec pas/vide estimés sur l'épaisseur de trait mesurée `t` et découpe aux ouvertures. Mesuré : **régresse** sur les plans H/V (faux segments sur hachures/mobilier) → réservé aux pointillés **obliques**. 6 tests unitaires (`tests/test_dotted_walls.py`).
+
+### 7.2 Noyau natif C++ (accélération optionnelle, repli garanti)
+
+`extractors/fast_wall_core.cpp` expose 5 points d'entrée `extern "C"` (zéro copie, pointeurs NumPy via `ctypes.data_as`) :
+
+| Point d'entrée | Rôle |
+|---|---|
+| `estimate_stroke_width_fused_c` | filtre 3×3 des jonctions + `2r−1` + quartiles O(K) (`std::nth_element`) |
+| `estimate_stroke_width_roi_c` | EDT 2D exacte (Meijster/Felzenszwalb) + Zhang-Suen, autonome (sans opencv-contrib) |
+| `reconstruct_dotted_line_c` | RANSAC orthogonal analytique (`½ atan2(2σxy, σxx−σyy)`) + coupure aux ouvertures |
+| `deduplicate_and_merge_segments_c` | déduplication + raccordement colinéaire avant appariement |
+| `pair_all_wall_faces_c` | appariement O(M²) des faces parallèles en murs à double trait |
+
+`extractors/fast_wall_bridge.py` compile automatiquement la DLL (g++/clang++/cl) si absente ou obsolète (`build_and_load_fast_wall`), et bascule sur `None` sans compilateur (`load_fast_wall_or_none`) → le pipeline reste en **Python pur** (`extractors/dotted_walls.py`). Aucun chemin par défaut ne dépend du natif.
+
+```bash
+python scripts/build_fast_wall.py     # compilation manuelle (facultative)
+python scripts/verify_fast_wall.py    # smoke test de bout en bout (skip sans compilateur)
+```
+
+Parité native/Python vérifiée par `tests/test_fast_wall_native.py` (skips si la DLL est absente).
+
 ---
 
 ## 8. Classeurs Excel
@@ -291,6 +321,8 @@ pip install -r requirements.txt
 python -m pytest tests -q                       # ~280 tests (Excel COM requis pour le recalcul réel, sinon skip)
 python assets/make_branding.py                  # icône .ico multi-tailles + splash depuis assets/app_icon_source.png
 python build_executable.py                      # dist/PlanBA_Metre_Extractor/ (onedir, windowed, icône)
+python scripts/build_fast_wall.py               # (optionnel) compile le noyau C++ -> extractors/fastwall.dll
+python scripts/verify_fast_wall.py              # (optionnel) vérifie les 4 étages du noyau natif
 ```
 
 Déploiement : copier **tout le dossier** `dist/PlanBA_Metre_Extractor/` (ex. `C:\PlanBA_App\PlanBA_Metre_Extractor\`), créer un raccourci vers `PlanBA_Metre_Extractor.exe` (icône `_internal\assets\app_icon.ico`). Les livrables sont écrits dans `output/` à côté de l'exécutable (`core/paths.py`). L'exécutable est `--windowed` : aucune console n'est ouverte.
