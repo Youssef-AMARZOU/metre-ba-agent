@@ -151,6 +151,17 @@ def _find_prebuilt(src_file: pathlib.Path) -> Optional[pathlib.Path]:
         p = here / name
         if p.exists():
             return p
+    # Exécutable figé (PyInstaller --onedir) : la DLL est embarquée dans
+    # _internal/extractors/ (sys._MEIPASS) ou à côté de l'exe.
+    import sys as _sys
+    for base in (getattr(_sys, "_MEIPASS", None),
+                 pathlib.Path(_sys.executable).parent):
+        if not base:
+            continue
+        for sub in ("extractors", ""):
+            p = pathlib.Path(base) / sub / "fastwall.dll"
+            if p.exists():
+                return p
     return None
 
 
@@ -161,10 +172,18 @@ def build_and_load_fast_wall(cpp_path=None) -> ctypes.CDLL:
     bibliothèque n'existe pas encore.
     """
     src_file = pathlib.Path(cpp_path) if cpp_path else _default_src()
+
+    prebuilt = _find_prebuilt(src_file)
+    if prebuilt:
+        # DLL déjà présente (compilée ou embarquée dans l'exe figé) : la
+        # charger directement si le source est absent ou pas plus récent.
+        if (not src_file.exists()
+                or src_file.stat().st_mtime <= prebuilt.stat().st_mtime):
+            return _bind_all(ctypes.CDLL(str(prebuilt)))
+
     if not src_file.exists():
         raise FileNotFoundError(f"Source C++ introuvable : {src_file}")
 
-    prebuilt = _find_prebuilt(src_file)
     lib_file = prebuilt or _default_lib(src_file)
 
     needs_build = (

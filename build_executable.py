@@ -106,6 +106,17 @@ def build():
     else:
         print("[WARN] assets/app_icon.ico absent — python assets/make_branding.py")
 
+    # Noyau natif optionnel (extractors/fast_wall_core.cpp compile) : embarqué
+    # s'il a été compilé (python scripts/build_fast_wall.py). Sans DLL, le
+    # pipeline bascule en Python pur (aucune régression).
+    fastwall_dll = ROOT / "extractors" / "fastwall.dll"
+    if fastwall_dll.exists():
+        args.extend(["--add-binary", f"{fastwall_dll};extractors"])
+        print("   Noyau natif embarque : extractors/fastwall.dll")
+    else:
+        print("[WARN] fastwall.dll absent — noyau natif non embarqué "
+              "(python scripts/build_fast_wall.py pour le compiler).")
+
     # Collect-all : binaires Tcl tkdnd (Drag & Drop), donnees ezdxf
     # (resources, fonts) et OCR local embarque (modeles .onnx + runtime).
     try:

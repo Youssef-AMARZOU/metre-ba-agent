@@ -22,12 +22,53 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
+
+# --- Noyau natif optionnel (extractors/fast_wall_core.cpp) -------------------
+# Chargé UNE SEULE FOIS ; ``None`` si le compilateur/la DLL sont absents. Le
+# pipeline reste alors en Python pur. La variable d'environnement
+# ``PLANBA_FASTWALL`` force l'activation/désactivation :
+#   - non définie : automatique (natif si la DLL est présente) ;
+#   - ``1|on``    : force, et ajoute la reconstruction pointillés RANSAC ;
+#   - ``0|off``   : désactive le natif.
+_NATIVE_LIB = None
+_NATIVE_TRIED = False
+
+
+def _native_lib():
+    """Charge le noyau natif une seule fois (``None`` si indisponible)."""
+    global _NATIVE_LIB, _NATIVE_TRIED
+    if not _NATIVE_TRIED:
+        _NATIVE_TRIED = True
+        try:
+            from extractors.fast_wall_bridge import load_fast_wall_or_none
+            _NATIVE_LIB = load_fast_wall_or_none()
+        except Exception:
+            _NATIVE_LIB = None
+    return _NATIVE_LIB
+
+
+def _native_enabled(use_native: Optional[bool]) -> bool:
+    """Résout le flag natif : explicite > variable d'env > auto (DLL présente)."""
+    env = os.environ.get("PLANBA_FASTWALL", "").strip().lower()
+    if use_native is not None:
+        return bool(use_native)
+    if env in ("0", "off", "false", "no"):
+        return False
+    if env in ("1", "on", "true", "yes"):
+        return True
+    return _native_lib() is not None
+
+
+#: Dernier état du noyau natif (lu par extract_from_image pour la traçabilité).
+_NATIVE_STATUS = {"active": False, "t": None, "dotted": False}
+
 
 FT_TO_M = 0.3048
 IN_TO_M = 0.0254
@@ -353,6 +394,12 @@ class PlanSurfaceExtractor:
         rep.level = level or self.detect_level(ocr_items) or "RDC"
         texte_boxes = [it["bbox"] for it in ocr_items if it.get("bbox")]
         wall_mask = self.wall_mask(img_bgr, text_boxes=texte_boxes)
+        if _NATIVE_STATUS.get("active"):
+            rep.warnings.append(
+                f"Noyau natif actif (épaisseur de trait mesurée : "
+                f"{_NATIVE_STATUS['t']:.1f} px)"
+                + (" — reconstruction pointillés RANSAC activée."
+                   if _NATIVE_STATUS.get("dotted") else "."))
         rep.building_bbox = self.building_bbox(wall_mask)
 
         def _analyse(items, rebuild_mask=False):
@@ -666,7 +713,8 @@ class PlanSurfaceExtractor:
 
     @staticmethod
     def wall_mask(img_bgr, min_wall_px: Optional[int] = None,
-                  text_boxes: Optional[Sequence[Sequence[int]]] = None):
+                  text_boxes: Optional[Sequence[Sequence[int]]] = None,
+                  use_native: Optional[bool] = None):
         """Murs = structures LONGUES, EPAISSES et CONTINUES.
 
         Un plan reel ne dessine pas toujours les murs en aplat noir :
@@ -694,6 +742,26 @@ class PlanSurfaceExtractor:
         Lgap = max(7, int(round(14 * u)))     # espace max entre deux pointilles
 
         ink = PlanSurfaceExtractor._binarize_ink(img_bgr)
+
+        # --- 1 bis. noyau natif optionnel : épaisseur de trait mesurée ------
+        # Si la DLL native est présente, on mesure l'épaisseur médiane des
+        # traits (EDT exacte + Zhang-Suen) ; elle sert à épaissir les pointillés
+        # reconstruits. Repli silencieux sur l'épaisseur d'échelle sinon.
+        _NATIVE_STATUS.update({"active": False, "t": None, "dotted": False})
+        native_t = None
+        native_on = _native_enabled(use_native)
+        if native_on:
+            lib = _native_lib()
+            if lib is not None:
+                try:
+                    from extractors.fast_wall_bridge import estimate_stroke_width_fast
+                    sw = estimate_stroke_width_fast(
+                        lib, ink, use_pure_cpp_thinning=True)
+                    if sw.get("confidence") == "candidate" and sw.get("width_px"):
+                        native_t = float(sw["width_px"])
+                        _NATIVE_STATUS.update({"active": True, "t": native_t})
+                except Exception:
+                    pass
 
         # --- 2. murs pleins (aplat noir) ------------------------------------
         k = max(3, int(round((min_wall_px or 3 * u))) | 1)
@@ -752,10 +820,27 @@ class PlanSurfaceExtractor:
         # la reconstruction RANSAC générique (extractors/dotted_walls.py) est
         # disponible en OPT-IN pour les pointillés OBLIQUES, mais elle régresse
         # les plans H/V (faux segments sur les hachures/mobilier).
+        dot_thick = k
+        if native_t:
+            # Épaisseur de pointillé mesurée par le noyau natif (dilatation de
+            # la chaîne reconstruite) : cosmétique, ne change pas la topologie.
+            dot_thick = max(k, int(round(native_t)) | 1)
         pointilles = PlanSurfaceExtractor._link_dot_chains(
-            points, thickness=k, min_len=Lmin,
+            points, thickness=dot_thick, min_len=Lmin,
             max_gap=max(Lgap, int(round(16 * u))),
             tol=max(2, int(round(2.5 * u))))
+
+        # Reconstruction pointillés RANSAC (uniquement si PLANBA_FASTWALL=1) :
+        # utile pour les pointillés OBLIQUES ; régresse les plans H/V.
+        if native_on and os.environ.get("PLANBA_FASTWALL", "").strip().lower() in ("1", "on", "true", "yes"):
+            try:
+                from extractors.dotted_walls import reconstruct_dotted_walls
+                dw_mask, _dw_diag = reconstruct_dotted_walls(ink)
+                if dw_mask.any():
+                    pointilles = cv2.bitwise_or(pointilles, dw_mask)
+                    _NATIVE_STATUS["dotted"] = True
+            except Exception:
+                pass
 
         traits = cv2.bitwise_or(nus, cv2.dilate(
             pointilles, np.ones((k, k), np.uint8)))
