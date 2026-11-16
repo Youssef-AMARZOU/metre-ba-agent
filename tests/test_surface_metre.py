@@ -41,14 +41,24 @@ def test_parse_length_invalide():
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("18'x10\"", (5.486, 3.048)),      # OCR ' lu " : contexte piece -> pieds
+    # Etiquettes de menuiseries : 10" = 10 POUCES (0,254 m) -> largeur de
+    # piece implausible (< 0,5 m) -> paire rejetee (anti faux positif).
+    ("18'x10\"", None),
+    ("13'x10\"", None),
+    ("18 x 10\"", None),
+    ("12'x.12m", None),
+    # Vraies cotes de pieces (pieds/pieds ou metriques) : inchangees.
     ("13'×10'", (3.962, 3.048)),
     ("4.20x3.50", (4.2, 3.5)),
     ("420 x 350", (4.2, 3.5)),
-    ("12'x.12\"", (3.658, 3.658)),
+    ("12'x12'", (3.658, 3.658)),
 ])
 def test_parse_room_dims(text, expected):
     got = parse_room_dims(text)
+    if expected is None:
+        # Etiquette de menuiserie / valeur implausible : paire rejetee.
+        assert got is None
+        return
     assert got is not None
     assert got[0] == pytest.approx(expected[0], abs=0.002)
     assert got[1] == pytest.approx(expected[1], abs=0.002)

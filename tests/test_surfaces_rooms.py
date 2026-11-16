@@ -406,3 +406,41 @@ def test_piece_en_l_adjacente_pas_de_double_compte():
     assert rooms["SALON"].area_m2 == pytest.approx(32.0, rel=0.12)
     assert rooms["CUISINE"].area_m2 == pytest.approx(4.0, rel=0.30)
     assert rooms["CUISINE"].area_m2 > 0.5, "CUISINE effacee par le double comptage"
+
+
+# ---------------------------------------------------------------------------
+# 14) Partition geodesique : le mur bloque la propagation (meme si la
+#     graine adverse est plus proche a vol d'oiseau) ; l'ouverture en bas
+#     laisse passer le rattachement.
+# ---------------------------------------------------------------------------
+def test_partition_geodesique_respecte_les_murs():
+    mask = np.ones((40, 60), np.uint8)
+    mask[0:36, 30] = 0               # mur vertical, ouverture en bas (36..)
+    src = PlanSurfaceExtractor.geodesic_partition(
+        mask, [(20, 5, 0), (20, 40, 1)])
+    assert src is not None
+    # (y=20, x=28) : graine 1 a 12 px a vol d'oiseau, graine 0 a 23 px ;
+    # le mur impose le detour par l'ouverture en bas -> graine 0.
+    assert src[20, 28] == 0
+    assert src[20, 32] == 1
+    assert src[38, 30] == 1          # par l'ouverture, le plus proche de 1
+    assert (src[mask.astype(bool)] >= 0).all()
+    assert (src[~mask.astype(bool)] == -1).all()
+    assert PlanSurfaceExtractor.geodesic_partition(mask, [(20, 5, 0)]) is not None
+    assert PlanSurfaceExtractor.geodesic_partition(mask, []) is None
+
+
+# ---------------------------------------------------------------------------
+# 15) Un nombre a 3+ chiffres en fin de libelle n'est pas un numero de
+#     piece (fragment de cote/superficie OCR) ; un numero a 1-2 chiffres
+#     isole reste rattache, comme avant.
+# ---------------------------------------------------------------------------
+def test_trois_chiffres_pas_un_numero_de_piece():
+    ocr = [{"text": "WALK-IN CLOSET 111", "bbox": (100, 100, 200, 22),
+            "conf": 0.9}]
+    labels = PlanSurfaceExtractor.room_labels(ocr, None, (900, 1200))
+    assert [lb["text"] for lb in labels] == ["WALK-IN CLOSET"]
+    ocr2 = ([{"text": "BEDROOM", "bbox": (100, 100, 100, 22), "conf": 0.9},
+             {"text": "2", "bbox": (100, 130, 15, 20), "conf": 0.9}])
+    labels2 = PlanSurfaceExtractor.room_labels(ocr2, None, (900, 1200))
+    assert [lb["text"] for lb in labels2] == ["BEDROOM 2"]

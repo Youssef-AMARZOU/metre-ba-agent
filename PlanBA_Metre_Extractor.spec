@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('C:/Users/youss/OneDrive/Desktop/dossier génie civil/metre-ba-agent/config', 'config'), ('C:/Users/youss/OneDrive/Desktop/dossier génie civil/metre-ba-agent/templates', 'templates'), ('C:/Users/youss/OneDrive/Desktop/dossier génie civil/metre-ba-agent/assets', 'assets')]
-binaries = []
+binaries = [('C:/Users/youss/OneDrive/Desktop/dossier génie civil/metre-ba-agent/extractors/fastwall.dll', 'extractors')]
 hiddenimports = ['customtkinter', 'openpyxl', 'pydantic', 'fitz', 'ezdxf', 'PIL', 'reportlab', 'numpy', 'tkinterdnd2', 'sklearn', 'sklearn.cluster', 'sklearn.neighbors', 'shapely', 'shapely.geometry', 'ifcopenshell', 'pdfplumber', 'core.schemas', 'core.calculator', 'core.ingestion', 'core.paths', 'core.validator', 'core.local_extractor', 'core.roi_slicer', 'core.tokenizer', 'core.normalization', 'core.ocr_engine', 'core.populate_modele', 'core.civil_engine', 'core.text_analyzer', 'core.metre_rules', 'core.geometry_analyzer', 'core.dxf_extractor', 'core.ifc_extractor', 'core.level_clustering', 'core.bet_contracts', 'core.moroccan_bet_engine', 'core.populate_modele_bet', 'core.vision_bridge', 'core.surface_metre_excel', 'extractors', 'extractors.surface_extractor', 'extractors.vision_extractor', 'extractors.ocr_router', 'extractors.vlm_router', 'cv2', 'requests', 'ui.desktop_app', 'build_metre', 'optimisation_chantiers', 'rapport_metre', 'extract_plan']
 tmp_ret = collect_all('ezdxf')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]

@@ -112,13 +112,19 @@ RX_HAS_UNIT = re.compile(r"['′’\"″”]|\bm\b|\bcm\b|\bmm\b|\d-\d", re.IGNO
 
 
 def parse_length(text: str, room_context: bool = False) -> Optional[float]:
-    """Texte de cote -> metres. `room_context` : dans 'L x l', un nombre
-    suivi de \" seul (OCR ' -> \") et >= 3 est lu en pieds."""
+    """Texte de cote -> metres.
+
+    ``room_context`` est conserve pour compatite d'appel : dans une paire
+    'L x l', un nombre suivi de `"` reste des POUCES (10" = 0,254 m), jamais
+    des pieds — voir la branche RX_IN_ONLY.
+    """
     if text is None:
         return None
     t = str(text).strip().replace("\u2032", "'").replace("\u2033", '"')
     t = t.replace("’", "'").replace("”", '"').strip("()[] ")
-    t = t.lstrip(".")
+    # '.12m' = 0.12 m : un point decimal initial n'est PAS un bruit OCR.
+    if t.startswith("."):
+        t = "0" + t
     if not t:
         return None
     m = RX_FT_IN.match(t)
@@ -131,9 +137,11 @@ def parse_length(text: str, room_context: bool = False) -> Optional[float]:
         return round(int(m.group(1)) * FT_TO_M + int(m.group(2)) * IN_TO_M, 3)
     m = RX_IN_ONLY.match(t)
     if m:
+        # Un nombre suivi de " est TOUJOURS des pouces : "13' x 10"" est une
+        # cote hybride pieds/pouces (10 in = 0,254 m), jamais 10 pieds.  La
+        # vieille heuristique (v >= 3 -> pieds) transformait les etiquettes de
+        # menuiseries en chambres de 50 m2 (faux positif).
         v = float(m.group(1).replace(",", "."))
-        if room_context and v >= 3:
-            return round(v * FT_TO_M, 3)
         return round(v * IN_TO_M, 3)
     m = RX_METRIC.match(t)
     if m:
@@ -1058,6 +1066,138 @@ class PlanSurfaceExtractor:
         return keep
 
     @staticmethod
+    def geodesic_partition(mask, seeds: Sequence[Tuple[int, int, int]]
+                           ) -> Optional[Any]:
+        """Rattachement de chaque pixel a la graine la plus proche EN
+        ESPACE LIBRE (distance geodesique, deux passes de chamfer).
+
+        La propagation ne traverse ni les murs ni le mobilier hors-masque :
+        une piece fermee reste rattachee a son libelle meme si un autre
+        libelle est plus proche a vol d'oiseau, et l'espace ouvert se
+        partage au plus proche libelle a travers les portes. Retourne le
+        tableau d'indices de graine (np.ndarray int32), ou None (graine
+        hors masque)."""
+        import numpy as np
+        m = np.asarray(mask).astype(bool, copy=False)
+        H, W = m.shape
+        if H < 3 or W < 3 or not seeds:
+            return None
+        inf = np.float32(1e15)
+        dist = np.full((H, W), inf, np.float32)
+        src = np.full((H, W), -1, np.int32)
+        for y, x, k in seeds:
+            if not (0 <= y < H and 0 <= x < W) or not m[y, x]:
+                return None
+            dist[y, x] = 0.0
+            src[y, x] = k
+        one = np.float32(1.0)
+        diag = np.float32(math.sqrt(2.0))
+        cols = np.arange(W, dtype=np.float32)
+
+        def chaine(ld, ls, valid):
+            # d[j] = min(ld[j], d[j-1] + 1) : scan cumule min-plus, O(W),
+            # SEGMENTE par les pixels hors masque : un mur arrete la chaine,
+            # rien ne le traverse horizontalement.
+            d = np.full_like(ld, inf)
+            s = np.full_like(ls, -1, dtype=np.int32)
+            if not valid.any():
+                return d, s
+            deb = np.flatnonzero(valid & np.concatenate(
+                (np.array([True]), ~valid[:-1])))
+            fin = np.flatnonzero(valid & np.concatenate(
+                (~valid[1:], np.array([True]))))
+            for a, b in zip(deb, fin):
+                ca = cols[:b - a + 1]
+                sa = ls[a:b + 1]
+                v = ld[a:b + 1] - ca
+                run = np.minimum.accumulate(v)
+                gagnant = np.maximum.accumulate(
+                    np.where(v <= run, ca, np.float32(0.0))).astype(np.intp)
+                d[a:b + 1] = ld[a:b + 1][gagnant] + (ca - gagnant)
+                s[a:b + 1] = sa[gagnant]
+            return d, s
+
+        def ligne(ld, ls, haut):
+            # Candidats verticaux + diagonaux (seule dependance inter-lignes,
+            # la ligne voisine est deja definitive), puis chaine horizontale.
+            base, sbase = (dist[haut], src[haut]) if haut >= 0 else (None, None)
+            if base is not None:
+                for wgt, shift in ((one, 0), (diag, -1), (diag, 1)):
+                    d = base + wgt
+                    s = sbase
+                    if shift == -1:
+                        d = np.concatenate((np.float32([inf]), d[:-1]))
+                        s = np.concatenate((np.int32([-1]), s[:-1]))
+                    elif shift == 1:
+                        d = np.concatenate((d[1:], np.float32([inf])))
+                        s = np.concatenate((s[1:], np.int32([-1])))
+                    maj = d < ld
+                    ld = np.where(maj, d, ld)
+                    ls = np.where(maj, s, ls)
+            return ld, ls
+
+        # Plusieurs allers-retours : DEUX passes laissent des poches non
+        # atteintes dans les couloirs en zigzag (le parcours alterne
+        # horizontalement). On repete jusqu'a stabilisation (distance de
+        # chamfer exacte), borne a 6 tours par securite. Le controle de
+        # couverture appartient a l'appelant (repli prorata si incomplet).
+        for _ in range(6):
+            avant = dist.copy()
+            # Passe avant : haut -> bas, chaine gauche -> droite.
+            for i in range(H):
+                ld, ls = ligne(dist[i].copy(), src[i].copy(), i - 1)
+                ld, ls = chaine(ld, ls, m[i])
+                dist[i], src[i] = ld, ls
+            # Passe arriere : bas -> haut, chaine droite -> gauche.
+            for i in range(H - 1, -1, -1):
+                ld, ls = ligne(dist[i].copy(), src[i].copy(),
+                               i + 1 if i + 1 < H else -1)
+                ld, ls = chaine(ld[::-1], ls[::-1], m[i][::-1])
+                dist[i], src[i] = ld[::-1], ls[::-1]
+            if np.array_equal(dist, avant):
+                break
+        return src
+
+    @staticmethod
+    def shared_region_shares(region: Dict[str, Any],
+                             members: Sequence[int],
+                             labels: Sequence[Dict[str, Any]],
+                             scale: float) -> Optional[List[float]]:
+        """Surface (m2) de chaque libelle d'une region partagee : partage
+        geodesique (pixel -> libelle le plus proche en espace libre).
+
+        Retourne None si le partage est impossible (repli au prorata des
+        boites mesurees). La somme des parts vaut toujours la region."""
+        import numpy as np
+        rx, ry, rw, rh = (int(v) for v in region["bbox"])
+        sub = region["mask"][ry:ry + rh, rx:rx + rw]
+        seeds: List[Tuple[int, int, int]] = []
+        for k, li in enumerate(members):
+            lx, ly, lw, lh = (int(v) for v in labels[li]["bbox"])
+            wx0, wy0 = max(0, lx - 4 - rx), max(0, ly - 4 - ry)
+            wx1, wy1 = min(rw, lx + lw + 4 - rx), min(rh, ly + lh + 4 - ry)
+            if wx0 >= wx1 or wy0 >= wy1:
+                return None
+            ys, xs = np.nonzero(sub[wy0:wy1, wx0:wx1])
+            if ys.size == 0:
+                return None
+            # Pixel reel du masque le plus proche du centroide du libelle.
+            ym, xm = float(ys.mean()), float(xs.mean())
+            pick = int(np.argmin((ys - ym) ** 2 + (xs - xm) ** 2))
+            seeds.append((int(ys[pick]) + wy0, int(xs[pick]) + wx0, k))
+        src = PlanSurfaceExtractor.geodesic_partition(sub, seeds)
+        if src is None:
+            return None
+        counts = np.bincount(src[src >= 0].ravel(), minlength=len(members))
+        # Tous les pixels de la region doivent etre rattaches, chaque
+        # libelle doit obtenir une part non nulle -> sinon repli.
+        if int(counts.sum()) != int(np.count_nonzero(sub)):
+            return None
+        if (counts <= 0).any():
+            return None
+        return [float(c) / (scale ** 2) for c in counts]
+
+    @staticmethod
     def room_labels(ocr_items: Sequence[Dict[str, Any]],
                     bbox: Optional[Tuple[int, int, int, int]],
                     shape: Tuple[int, int]) -> List[Dict[str, Any]]:
@@ -1068,8 +1208,10 @@ class PlanSurfaceExtractor:
         for it in ocr_items:
             t = str(it["text"]).strip()
             # Numero de piece isole par l'OCR ('BEDROOM' / '2') : rattache
-            # ensuite au libelle qu'il accompagne.
-            if re.fullmatch(r"\d{1,3}", t):
+            # ensuite au libelle qu'il accompagne. Un nombre a 3 chiffres
+            # n'est PAS un numero de piece : c'est un fragment de cote ou de
+            # superficie ('111') lu par l'OCR.
+            if re.fullmatch(r"\d{1,2}", t):
                 cx0 = it["bbox"][0] + it["bbox"][2] / 2.0
                 cy0 = it["bbox"][1] + it["bbox"][3] / 2.0
                 if bbox is not None:
@@ -1150,6 +1292,13 @@ class PlanSurfaceExtractor:
             best["bbox"] = (nx0, ny0, nx1 - nx0, ny1 - ny0)
             best["pt"] = (nx0 + (nx1 - nx0) / 2.0, ny0 + (ny1 - ny0) / 2.0)
             best["conf"] = min(best["conf"], num["conf"])
+        # Un nombre a 3+ chiffres en fin de libelle n'est pas un numero de
+        # piece : c'est un fragment de cote/superficie fusionne par l'OCR
+        # ('WALK-IN CLOSET 111' -> 'WALK-IN CLOSET', faux positif).
+        for m in merged:
+            propre = re.sub(r"\s*\d{3,}$", "", m["text"]).strip()
+            if propre:
+                m["text"] = propre
         return merged
 
     # ------------------------------------------------------------------
@@ -1511,6 +1660,12 @@ class PlanSurfaceExtractor:
                     (round(box_px[3] / scale, 2), round(box_px[2] / scale, 2)))
                 room.source = "segmentation"
                 room.confidence = round(min(lb["conf"], conf, 0.85), 2)
+                # Rattachement a la region : deux boites d'une MEME region
+                # se recouvrent par construction — l'anti-double-comptage
+                # doit les eviter (sinon il retraitait une somme deja
+                # repartie au prorata et faisait disparaitre des mesures).
+                if region is not None:
+                    region_of_room[id(room)] = region
                 if conf < 0.5:
                     room.warnings.append("Echelle peu fiable : surface indicative.")
             elif scale and env_px and shared:
@@ -1557,28 +1712,53 @@ class PlanSurfaceExtractor:
         # region est la seule mesure fiable. On repartit cette surface entre
         # les pieces au prorata de leurs mesures individuelles -> la somme
         # reste egale a la surface reelle (aucun double comptage, aucun
-        # metre carre invente).
+        # metre carre invente). Exception : une boite DEGENEREE (surface
+        # moindre que le double de celle de son libelle : meubles/texte, pas
+        # une piece — ex. le tapis du salon) n'a aucune valeur de poids ; on
+        # lui substitue sa part geodesique dans la region (espace libre).
         if scale:
             for rid, lis in labels_in_region.items():
                 if len(lis) < 2:
                     continue
                 region = next(r for r in regions if r["id"] == rid)
                 seg = region["area_px"] / (scale ** 2)
-                indiv = [room_of_label[j].area_segmented_m2 for j in lis
-                         if j in room_of_label]
+                members = [j for j in lis if j in room_of_label]
+                indiv = [room_of_label[j].area_segmented_m2 for j in members]
                 if any(v is None for v in indiv) or sum(indiv) <= 0:
                     continue
                 total = float(sum(indiv))
                 if abs(total - seg) / max(seg, 1e-6) <= 0.02:
                     continue
-                factor = seg / total
-                for j, v in zip([j for j in lis if j in room_of_label], indiv):
-                    room_of_label[j].area_segmented_m2 = round(v * factor, 2)
-                    if room_of_label[j].perimeter_m:
-                        room_of_label[j].perimeter_m = round(
-                            room_of_label[j].perimeter_m
-                            * math.sqrt(factor), 2)
-                    room_of_label[j].warnings.append(
+                degen = []
+                for j, v in zip(members, indiv):
+                    lw = max(1, int(labels[j]["bbox"][2]))
+                    lh = max(1, int(labels[j]["bbox"][3]))
+                    degen.append(v < 2.0 * (lw * lh) / (scale ** 2))
+                weights = list(indiv)
+                if any(degen):
+                    parts = self.shared_region_shares(region, members,
+                                                      labels, scale)
+                    if parts is not None:
+                        for k, d in enumerate(degen):
+                            if d:
+                                weights[k] = parts[k]
+                factor = seg / float(sum(weights))
+                for k, (j, v) in enumerate(zip(members, indiv)):
+                    room = room_of_label[j]
+                    new = round(weights[k] * factor, 2)
+                    room.area_segmented_m2 = new
+                    if room.perimeter_m and v > 0:
+                        f = math.sqrt(new / v)
+                        room.perimeter_m = round(room.perimeter_m * f, 2)
+                        if room.width_m and room.length_m:
+                            room.width_m = round(room.width_m * f, 2)
+                            room.length_m = round(room.length_m * f, 2)
+                    if degen[k] and new > v * 2.0:
+                        room.warnings.append(
+                            f"Boite ancree ignoree ({v:.2f} m², meubles/"
+                            f"texte) : part geodesique dans l'espace "
+                            f"libre, {new:.2f} m².")
+                    room.warnings.append(
                         f"Region partagee {seg:.2f} m² repartie au prorata des "
                         f"pieces mesurees (facteur {factor:.3f}) : la somme "
                         f"egale la surface de la region.")
