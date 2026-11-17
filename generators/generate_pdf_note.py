@@ -12,6 +12,13 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 POIDS_NOMINAUX_BET = {6: 0.222, 8: 0.395, 10: 0.617, 12: 0.888, 14: 1.208,
                       16: 1.578, 20: 2.466, 25: 3.853, 32: 6.313}
 
+from core.guardrails import valeur_lue
+
+
+def _lue(obj, cle):
+    """Lecture sans defaut invente (RG-6) : None si absent/vide/nul."""
+    return valeur_lue(obj, cle)
+
 
 def _pml(phi):
     """Poids nominal BET (kg/ml), repli phi^2/162."""
@@ -284,9 +291,22 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
     tot_fouille = 0.0
     tot_bp = 0.0
     tot_ba = 0.0
+    missing_notes: list = []   # elements A RENSEIGNER (ex: note de calcul honnete)
 
     for s in semelles:
-        a, b, h = float(s.get("a", 1.0)), float(s.get("b", 1.0)), float(s.get("h", 0.3))
+        a, b, h = (_lue(s, "a"), _lue(s, "b"), _lue(s, "h"))
+        rep = f"Semelle {s.get('type', 'S')} ({s.get('axe', '?')}-{s.get('file', '?')})"
+        if a is None or b is None or h is None:
+            missing_notes.append(f"{rep} : a/b/h non lus ({(a, b, h)}) — A RENSEIGNER")
+            geo_rows.append([
+                Paragraph(f"<b>{rep}</b>", table_body),
+                Paragraph(f"Axe {s.get('axe', '')} - File {s.get('file', '')}", table_body),
+                Paragraph("A RENSEIGNER", table_body),
+                Paragraph("-", table_body),
+                Paragraph("-", table_body),
+                Paragraph("-", table_body),
+            ])
+            continue
         v_f = round((a + 0.20) * (b + 0.20) * 1.20, 3)
         v_p = round((a + 0.10) * (b + 0.10) * 0.10, 3)
         v_b = round(a * b * h, 3)
@@ -306,8 +326,20 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
     # Fûts / amorce-poteaux : section poteau x hauteur sous longrine
     tfut = 0.0
     for p in donnees_plan.get("poteaux", []):
-        a, b = float(p.get("a", 0)), float(p.get("b", 0))
-        haut = float(p.get("hauteur", 3.0))
+        a, b, haut = (_lue(p, "a"), _lue(p, "b"), _lue(p, "hauteur"))
+        rep = f"Fût {p.get('type', '?')} ({p.get('axe', '?')}-{p.get('file', '?')})"
+        if a is None or b is None or haut is None:
+            missing_notes.append(f"{rep} : a/b/hauteur non lus ({(a, b, haut)}) — A RENSEIGNER")
+            geo_rows.append([
+                Paragraph(f"<b>{rep}</b>", table_body),
+                Paragraph(f"Axe {p.get('axe', '?')} - File {p.get('file', '?')}",
+                          table_body),
+                Paragraph("A RENSEIGNER", table_body),
+                Paragraph("-", table_body),
+                Paragraph("-", table_body),
+                Paragraph("-", table_body),
+            ])
+            continue
         vf = round(a * b * haut, 3)
         tfut += vf
         geo_rows.append([
@@ -320,8 +352,9 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
             Paragraph(f"<b>{vf:.3f}</b>", table_body),
         ])
 
+    _part = f" (PARTIEL — {len(missing_notes)} type(s) A RENSEIGNER)" if missing_notes else ""
     geo_rows.append([
-        Paragraph("<b>TOTAL BRUT CHANTIER</b>", table_header),
+        Paragraph(f"<b>TOTAL BRUT CHANTIER{_part}</b>", table_header),
         Paragraph("-", table_body),
         Paragraph("-", table_body),
         Paragraph(f"<b>{tot_fouille:.3f} m³</b>", table_header),
@@ -329,7 +362,7 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
         Paragraph(f"<b>{tot_ba + tfut:.3f} m³</b>", table_header),
     ])
     geo_rows.append([
-        Paragraph("<b>TOTAL +3% PERTES BÉTON</b>", table_header),
+        Paragraph(f"<b>TOTAL +3% PERTES BÉTON{_part}</b>", table_header),
         Paragraph("-", table_body),
         Paragraph("-", table_body),
         Paragraph(f"<b>{tot_fouille * 1.03:.2f} m³</b>", table_header),
@@ -385,10 +418,19 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
     tot_sem_kg = 0.0
 
     for s in semelles:
-        a, b = float(s.get("a", 1.0)), float(s.get("b", 1.0))
-        phi = int(s.get("phi", 12))
-        nb_x = int(s.get("nb_x", 8))
-        nb_y = int(s.get("nb_y", s.get("nb_x", 8)))
+        a = _lue(s, "a"); b = _lue(s, "b")
+        phi = _lue(s, "phi")
+        nb_x = _lue(s, "nb_x")
+        # nb_y absent en general : literie isotopique, fallback nb_x (documenté)
+        nb_y_raw = s.get("nb_y")
+        nb_y = nb_y_raw if nb_y_raw not in (None, 0, "", False) else nb_x
+        rep = f"Semelle {s.get('type', 'S')} ({s.get('axe', '?')}-{s.get('file', '?')})"
+        if a is None or b is None or phi is None or nb_x is None or nb_y is None:
+            missing_notes.append(
+                f"{rep} : ferraillage a/b/phi/nb_x non lus "
+                f"({(a, b, phi, nb_x, nb_y)}) — A RENSEIGNER")
+            continue
+        phi = int(phi); nb_x = int(nb_x); nb_y = int(nb_y)
         pml = _pml(phi)
 
         # Nappe X — formule chantier : L = (cote - 2x enrobage 5cm) + 34xphi
@@ -427,10 +469,14 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
     tot_pot_kg = 0.0
     for p in donnees_plan.get("poteaux", []):
         lab = str(p.get("type", "?"))
-        a, b = float(p.get("a", 0)), float(p.get("b", 0))
-        haut = float(p.get("hauteur", 3.0))
+        a = _lue(p, "a"); b = _lue(p, "b"); haut = _lue(p, "hauteur")
+        rep = f"Fût {lab} ({p.get('axe', '?')}-{p.get('file', '?')})"
+        if a is None or b is None or haut is None:
+            missing_notes.append(
+                f"{rep} : a/b/hauteur non lus ({(a, b, haut)}) — A RENSEIGNER (ferraillage ignoré)")
+            continue
         for lb in p.get("long_bars", []) or []:
-            if lb.get("nb", 0) > 0 and lb.get("phi", 0) > 0:
+            if (_lue(lb, "nb") or 0) > 0 and (_lue(lb, "phi") or 0) > 0:
                 l_unit = round(haut + 0.50, 3)
                 lin = round(lb["nb"] * l_unit, 2)
                 pds = round(lin * _pml(lb["phi"]), 2)
@@ -446,7 +492,7 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
                     Paragraph(f"{pds:.2f}", table_body),
                 ])
         cad = p.get("cadres", {}) or {}
-        if cad.get("phi", 0) > 0 and (cad.get("esp") or 0) > 0:
+        if _lue(cad, "phi") and (_lue(cad, "esp") or 0) > 0:
             phi_c = cad["phi"]
             ancrage = max(10 * phi_c / 1000.0, 0.10)
             perim = round(2 * (a + b) - 8 * 0.05 + 2 * ancrage, 3)
@@ -470,7 +516,11 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
     poutres_sans_portee = 0
     for p in donnees_plan.get("poutres", []):
         lab = f"Poutre {p.get('type', '?')}"
-        b, h = float(p.get("b", 0)), float(p.get("h", 0))
+        b = _lue(p, "b"); h = _lue(p, "h")
+        if b is None or h is None:
+            missing_notes.append(
+                f"Poutre {p.get('type', '?')} : b/h non lus ({(b, h)}) — A RENSEIGNER (ferraillage ignoré)")
+            continue
         portee = p.get("portee")
         for fi in (p.get("filants_inf", []) or []) + \
                 (p.get("filants_sup", []) or []):
@@ -599,11 +649,19 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
         ],
         [
             Paragraph("<b>DÉCISION DU CONTRÔLE TECHNIQUE :</b>", body_txt),
-            Paragraph("<font color='#0D9488'><b>BON POUR EXÉCUTION (BPE)"
-                      "</b></font> <i>(sous réserve des tolérances "
-                      "Eurocode 2 — bon de commande usine / "
-                      "ferrailleur)</i>", bold_txt),
-            Paragraph("Armatures certifiées NF AFCAB / B500B", body_txt),
+            (Paragraph(
+                "<font color='#B91C1C'><b>VISA À RENSEIGNER — "
+                "ÉLÉMENTS INCOMPLETS</b></font> "
+                "<i>(un métré incomplet n'est pas un métré ; "
+                "relire la fondation et renseigner les côtes)</i>",
+                bold_txt) if missing_notes else
+             Paragraph(
+                "<font color='#0D9488'><b>BON POUR EXÉCUTION (BPE)</b></font> "
+                "<i>(sous réserve des tolérances Eurocode 2 — "
+                "bon de commande usine / ferrailleur)</i>",
+                bold_txt)),
+            (Paragraph("Voir avertissements ci-après", body_txt) if missing_notes
+             else Paragraph("Armatures certifiées NF AFCAB / B500B", body_txt)),
         ]
     ]
     t_synth = Table(synth_data, colWidths=[180, 160, 183])
@@ -616,6 +674,14 @@ def generer_note_calcul_chantier(donnees_plan: dict, out_pdf_path: str):
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
     ]))
     story.append(t_synth)
+
+    # Avertissements honnetes: CHAQUE element A RENSEIGNER
+    if missing_notes:
+        story.append(Spacer(1, 6))
+        story.append(Paragraph("<b>AVERTISSEMENTS — ÉLÉMENTS À RENSEIGNER</b>",
+                              bold_txt))
+        for n in missing_notes:
+            story.append(Paragraph("• " + n, body_txt))
 
     # Construction du document avec le canvas technique d'ingénierie
     Path(out_pdf_path).parent.mkdir(parents=True, exist_ok=True)
