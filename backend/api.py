@@ -1,16 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """backend/api.py — FastAPI server for Métré BA Agent."""
-import os, sys, json, asyncio, subprocess, uuid
+import os, sys, json, asyncio, subprocess, uuid, re, secrets
 from pathlib import Path
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 app = FastAPI(title="Metré BA Agent API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# ─── Sécurité de l'API locale ───────────────────────────────────────────────
+# L'API écoute sur 127.0.0.1, mais n'importe quelle page web ouverte dans le
+# navigateur peut joindre 127.0.0.1. Trois verrous :
+#   1. Jeton secret partagé avec Electron (header X-PlanBA-Token) ;
+#   2. CORS limité à l'interface Electron (pages file:// -> Origin "null") ;
+#   3. Host limité à localhost (bloque le DNS rebinding).
+API_TOKEN = os.environ.get("PLANBA_API_TOKEN", "").strip()
+if not API_TOKEN:
+    # Lancement manuel (start.bat, uvicorn à la main) : jeton aléatoire,
+    # affiché uniquement dans la console locale pour les tests en CLI.
+    API_TOKEN = secrets.token_urlsafe(32)
+    print(f"[PlanBA] PLANBA_API_TOKEN non défini - jeton de session : {API_TOKEN}",
+          file=sys.stderr)
+TOKEN_HEADER = "X-PlanBA-Token"
+PUBLIC_PATHS = {"/health"}
+
+
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    if request.method == "OPTIONS" or request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+    sent = request.headers.get(TOKEN_HEADER, "")
+    if not secrets.compare_digest(sent.encode(), API_TOKEN.encode()):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+app.add_middleware(CORSMiddleware, allow_origins=["null", "file://"],
+                   allow_methods=["GET", "POST"],
+                   allow_headers=["Content-Type", TOKEN_HEADER])
+app.add_middleware(TrustedHostMiddleware,
+                   allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
 ROOT = Path(__file__).resolve().parent.parent
+OUTPUT_DIR = (ROOT / "output").resolve()
+JOB_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 JOBS = {}
 
 # Load BAEL 91 cost database
@@ -274,7 +309,13 @@ async def get_status(job_id: str):
 
 @app.get("/download/{job_id}/{filename}")
 async def download(job_id: str, filename: str):
-    fpath = ROOT / "output" / job_id / filename
-    if fpath.exists():
-        return FileResponse(fpath, filename=filename)
-    return {"error": "not found"}, 404
+    # job_id = 8 caractères hexa (uuid4()[:8]) ; filename = nom simple, sans
+    # séparateur ni '..' (sous Windows, '\\' est aussi un séparateur).
+    if (not JOB_ID_RE.fullmatch(job_id) or "/" in filename or "\\" in filename
+            or ".." in filename or ":" in filename or not filename.strip()):
+        raise HTTPException(status_code=404, detail="not found")
+    job_dir = (OUTPUT_DIR / job_id).resolve()
+    fpath = (job_dir / filename).resolve()
+    if job_dir.parent != OUTPUT_DIR or fpath.parent != job_dir or not fpath.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(fpath, filename=fpath.name)

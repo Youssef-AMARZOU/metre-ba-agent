@@ -32,6 +32,7 @@ from core.bet_contracts import (
     ExtractedPlanRecord,
     RebarScheduleRow,
 )
+from core.guardrails import valeur_lue
 from core.moroccan_bet_engine import (
     MOROCCAN_REBAR_CATALOG,
     MOROCCAN_STEEL_RATIO_BOUNDS,
@@ -170,6 +171,26 @@ class PlanBAExcelPopulator:
         self.border_total = Border(top=thin, bottom=medium, left=thin, right=thin)
 
     # ------------------------------------------------------------------
+    # RG-6 : jamais de dimension par défaut
+    # ------------------------------------------------------------------
+    def _refuser_si_manquant(self, rec, manquants) -> bool:
+        """Aucune ligne n'est calculée avec une dimension inventée.
+
+        Retourne True (et lève une anomalie BLOQUANT) si une dimension
+        requise n'a pas été lue sur le plan.
+        """
+        if not manquants:
+            return False
+        self.engine.anomalies.append(AuditAnomaly(
+            severity="BLOQUANT", element_label=rec.label,
+            rule_code="DIMENSION_NON_LUE",
+            message=(f"{rec.label} : dimension(s) non lue(s) sur le plan "
+                     f"({', '.join(manquants)}) — ligne non métrée, "
+                     "aucune valeur par défaut."),
+            suggested_fix="Lire la cote sur la coupe/le tableau et la saisir."))
+        return True
+
+    # ------------------------------------------------------------------
     # Calcul (deterministe) a partir des enregistrements
     # ------------------------------------------------------------------
     def compute(self, raw_records: List[ExtractedPlanRecord]
@@ -189,14 +210,24 @@ class PlanBAExcelPopulator:
             rows.extend(sched)
 
             if rec.category == "semelle":
+                A = valeur_lue(dims, "A", "a")
+                B = valeur_lue(dims, "B", "b")
+                h_patin = valeur_lue(dims, "h_patin", "H", "h")
+                h_glacis = valeur_lue(dims, "h_glacis") or 0.0
+                a_fut = valeur_lue(dims, "a_fut")
+                b_fut = valeur_lue(dims, "b_fut")
+                manquants = [n for n, v in (("A", A), ("B", B),
+                                            ("h_patin", h_patin)) if v is None]
+                if h_glacis > 0:
+                    manquants += [n for n, v in (("a_fut", a_fut),
+                                                 ("b_fut", b_fut)) if v is None]
+                if self._refuser_si_manquant(rec, manquants):
+                    continue
                 line_bp, line_ba = self.engine.compute_semelle_isolee(
-                    label=rec.label, qty=qty,
-                    A=dims.get("A", dims.get("a", 1.20)),
-                    B=dims.get("B", dims.get("b", 1.20)),
-                    h_patin=dims.get("h_patin", dims.get("H", dims.get("h", 0.35))),
-                    h_glacis=dims.get("h_glacis", 0.0),
-                    a_fut=dims.get("a_fut", 0.30),
-                    b_fut=dims.get("b_fut", 0.30),
+                    label=rec.label, qty=qty, A=A, B=B, h_patin=h_patin,
+                    h_glacis=h_glacis,
+                    # fût sans objet si pas de glacis : valeur neutre
+                    a_fut=a_fut or 0.0, b_fut=b_fut or 0.0,
                 )
                 line_bp.grid_locations = list(rec.grid_axes)
                 line_ba.grid_locations = list(rec.grid_axes)
@@ -205,13 +236,20 @@ class PlanBAExcelPopulator:
                 lines.extend([line_bp, line_ba])
 
             elif rec.category in ("poutre", "longrine", "chainage"):
+                portee = valeur_lue(dims, "L", "portee")
+                b_poutre = valeur_lue(dims, "b")
+                h_totale = valeur_lue(dims, "h")
+                if self._refuser_si_manquant(rec, [
+                        n for n, v in (("portee", portee), ("b", b_poutre),
+                                       ("h", h_totale)) if v is None]):
+                    continue
                 line = self.engine.compute_poutre_entre_nus(
                     label=rec.label, qty=qty,
-                    portee_axe_axe=dims.get("L", dims.get("portee", 4.50)),
+                    portee_axe_axe=portee,
                     largeur_poteau_gauche=rec.support_left_m,
                     largeur_poteau_droite=rec.support_right_m,
-                    b_poutre=dims.get("b", 0.25),
-                    h_totale=dims.get("h", 0.45),
+                    b_poutre=b_poutre,
+                    h_totale=h_totale,
                     type_plancher=rec.type_plancher,
                     epaisseur_dalle=rec.epaisseur_dalle_m,
                     category=rec.category,
@@ -222,14 +260,19 @@ class PlanBAExcelPopulator:
                 lines.append(line)
 
             elif rec.category in ("poteau", "voile"):
+                b_p = valeur_lue(dims, "b", "e")
+                if rec.category == "voile":
+                    h_p = valeur_lue(dims, "h", "L")
+                    haut = valeur_lue(dims, "H", "hauteur", "L")
+                else:
+                    h_p = valeur_lue(dims, "h")
+                    haut = valeur_lue(dims, "L", "H", "hauteur")
+                if self._refuser_si_manquant(rec, [
+                        n for n, v in (("b", b_p), ("h", h_p),
+                                       ("hauteur", haut)) if v is None]):
+                    continue
                 line = self.engine.compute_poteau(
-                    label=rec.label, qty=qty,
-                    b=dims.get("b", dims.get("e", 0.25)),
-                    h=dims.get("h", dims.get("L", 0.30))
-                    if rec.category == "voile" else dims.get("h", 0.30),
-                    hauteur=dims.get("H", dims.get("hauteur", dims.get("L", 3.00)))
-                    if rec.category == "voile"
-                    else dims.get("L", dims.get("H", dims.get("hauteur", 3.00))),
+                    label=rec.label, qty=qty, b=b_p, h=h_p, hauteur=haut,
                     category=rec.category,
                 )
                 line.grid_locations = list(rec.grid_axes)
@@ -238,9 +281,13 @@ class PlanBAExcelPopulator:
                 lines.append(line)
 
             elif rec.category == "dalle_pleine":
-                L = dims.get("L", dims.get("A", 0.0))
-                l_ = dims.get("B", dims.get("b", 0.0))
-                e = dims.get("e", dims.get("ep", dims.get("h", 0.0)))
+                L = valeur_lue(dims, "L", "A")
+                l_ = valeur_lue(dims, "B", "b")
+                e = valeur_lue(dims, "e", "ep", "h")
+                if self._refuser_si_manquant(rec, [
+                        n for n, v in (("L", L), ("l", l_), ("e", e))
+                        if v is None]):
+                    continue
                 line = AvantMetreLine(
                     prix_code=PRIX_CODES["dalle_pleine"],
                     category="dalle_pleine",

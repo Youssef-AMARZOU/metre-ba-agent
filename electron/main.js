@@ -1,8 +1,14 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, session } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const http = require('http');
+const crypto = require('crypto');
+
+// Jeton secret de session, partagé uniquement avec le backend Python
+// (variable d'environnement) et injecté dans les requêtes de l'UI.
+const API_TOKEN = crypto.randomBytes(32).toString('hex');
+const TOKEN_HEADER = 'X-PlanBA-Token';
 
 let mainWindow;
 let splashWindow;
@@ -159,6 +165,7 @@ function startPythonBackend(port) {
   ], {
     cwd: backendDir,
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, PLANBA_API_TOKEN: API_TOKEN },
   });
 
   pythonProcess.stdout.on('data', (data) => {
@@ -198,6 +205,15 @@ app.whenReady().then(async () => {
   const port = await findAvailablePort();
   appUrl = `http://127.0.0.1:${port}`;
 
+  // Ajoute le jeton à toutes les requêtes de l'UI vers le backend local,
+  // sans l'exposer au code de la page (renderer).
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: [`http://127.0.0.1:${port}/*`] },
+    (details, callback) => {
+      details.requestHeaders[TOKEN_HEADER] = API_TOKEN;
+      callback({ requestHeaders: details.requestHeaders });
+    });
+
   bootStage('sidecar', 'active', 'Démarrage du serveur...');
   startPythonBackend(port);
 
@@ -220,7 +236,7 @@ app.whenReady().then(async () => {
   // Check addons
   try {
     const data = await new Promise((resolve, reject) => {
-      http.get(appUrl + '/addons', { timeout: 5000 }, (res) => {
+      http.get(appUrl + '/addons', { timeout: 5000, headers: { [TOKEN_HEADER]: API_TOKEN } }, (res) => {
         let body = '';
         res.on('data', (chunk) => body += chunk);
         res.on('end', () => {

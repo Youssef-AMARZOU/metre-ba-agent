@@ -45,6 +45,18 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from core.bet_contracts import DrawingElement, ExtractedPlanRecord  # noqa: F401
+from core.guardrails import A_RENSEIGNER, ou_a_renseigner, valeur_lue
+
+
+def _dim(src, cle):
+    """Dimension lue, sinon « A RENSEIGNER » (RG-6 : jamais de défaut)."""
+    return ou_a_renseigner(valeur_lue(src, cle))
+
+
+def _plus(src, cle, delta):
+    """Dimension lue + débord (fouille, BP), sinon « A RENSEIGNER »."""
+    val = valeur_lue(src, cle)
+    return round(val + delta, 3) if val is not None else A_RENSEIGNER
 from core.populate_modele_bet import (  # noqa: F401
     PlanBAExcelPopulator, SHEET_NAMES, optimize_12m_stock_bars)
 
@@ -220,20 +232,20 @@ def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
         ("Terrassement en fouilles",
          [(s.get("axe", ""), s.get("file", ""),
            f"Fouille Semelle {s.get('type', '?')}", "M3", 1,
-           round(float(s.get("a", 0)) + 0.20, 3),
-           round(float(s.get("b", 0)) + 0.20, 3), 1.20)
+           _plus(s, "a", 0.20),
+           _plus(s, "b", 0.20), 1.20)
           for s in semelles]),
         ("Béton de propreté dosé à 150 kg/m³",
          [(s.get("axe", ""), s.get("file", ""),
            f"BP Semelle {s.get('type', '?')}", "M3", 1,
-           round(float(s.get("a", 0)) + 0.10, 3),
-           round(float(s.get("b", 0)) + 0.10, 3), 0.10)
+           _plus(s, "a", 0.10),
+           _plus(s, "b", 0.10), 0.10)
           for s in semelles]),
         ("Béton armé en fondation dosé à 350 kg/m³",
          [(s.get("axe", ""), s.get("file", ""),
            f"Semelle {s.get('type', '?')}", "M3", 1,
-           float(s.get("a", 0)), float(s.get("b", 0)),
-           float(s.get("h", 0)))
+           _dim(s, "a"), _dim(s, "b"),
+           _dim(s, "h"))
           for s in semelles]),
     ]
     if poteaux:
@@ -241,8 +253,9 @@ def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
             ("Béton pour fûts de poteaux en fondation",
              [(p.get("axe", ""), p.get("file", ""),
                f"Fût {p.get('type', '?')}", "M3", 1,
-               float(p.get("a", 0)), float(p.get("b", 0)),
-               float(p.get("hauteur", 3.0)))
+               _dim(p, "a"),
+               _dim(p, "b"),
+               _dim(p, "hauteur"))
               for p in poteaux]))
 
     # Poutres
@@ -251,8 +264,8 @@ def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
             ("Béton pour poutres",
              [(p.get("axe", ""), "",
                f"Poutre {p.get('type', '?')}", "M3", 1,
-               float(p.get("b", 0)), float(p.get("h", 0)),
-               float(p.get("portee") or 3.5))
+               _dim(p, "b"), _dim(p, "h"),
+               _dim(p, "portee"))
               for p in poutres]))
 
     # Longrines
@@ -261,8 +274,8 @@ def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
             ("Béton pour longrines",
              [(l.get("axe", ""), "",
                f"Longrine {l.get('type', '?')}", "M3", 1,
-               float(l.get("b", 0)), float(l.get("h", 0)),
-               float(l.get("portee") or 3.5))
+               _dim(l, "b"), _dim(l, "h"),
+               _dim(l, "portee"))
               for l in longrines]))
 
     # Chainages
@@ -271,8 +284,8 @@ def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
             ("Béton pour chaînages",
              [(c.get("axe", ""), "",
                f"Chaînage {c.get('type', '?')}", "M3", 1,
-               float(c.get("b", 0)), float(c.get("h", 0)),
-               float(c.get("portee") or 3.5))
+               _dim(c, "b"), _dim(c, "h"),
+               _dim(c, "portee"))
               for c in chainages]))
 
     # Murs (bandes noyees)
@@ -281,8 +294,8 @@ def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
             ("Béton pour bandes noyées",
              [(m.get("axe", ""), "",
                f"BN {m.get('type', '?')}", "M3", 1,
-               float(m.get("b", 0)), float(m.get("h", 0)),
-               float(m.get("portee") or 3.5))
+               _dim(m, "b"), _dim(m, "h"),
+               _dim(m, "portee"))
               for m in murs]))
 
     # Voiles
@@ -291,8 +304,8 @@ def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
             ("Béton pour voiles",
              [(v.get("axe", ""), "",
                f"Voile {v.get('type', '?')}", "M3", 1,
-               float(v.get("ep", 0.20)),
-               float(v.get("hauteur", 3.0)),
+               _dim(v, "ep"),
+               _dim(v, "hauteur"),
                1.0)
               for v in voiles]))
 
@@ -307,15 +320,21 @@ def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
         row += 1
         debut = row
         for (axe, file_, des, unit, n, g, h, i) in lignes:
-            j = (f"=IF(COUNTA(G{row}:I{row})>0,"
-                 f"F{row}*PRODUCT(G{row}:I{row}),F{row})")
+            # RG-6 : une dimension « A RENSEIGNER » rend la ligne
+            # non calculable (PRODUCT ignorerait le texte en silence).
+            j = (f'=IF(COUNTIF(G{row}:I{row},"{A_RENSEIGNER}")>0,'
+                 f'"{A_RENSEIGNER}",'
+                 f"IF(COUNTA(G{row}:I{row})>0,"
+                 f"F{row}*PRODUCT(G{row}:I{row}),F{row}))")
             vals = [None, axe, file_, des, unit, n, g, h, i, j, None]
             _apply_row(ws, row, st_entry, vals)
             row += 1
         fin = row - 1
         if lignes:
-            sub_j = f"=SUM(J{debut}:J{fin})"
-            sub_k = f"=SUM(J{debut}:J{fin})"
+            # Sous-total refusé tant qu'une ligne est à renseigner.
+            sub_j = (f'=IF(COUNTIF(J{debut}:J{fin},"{A_RENSEIGNER}")>0,'
+                     f'"INCOMPLET",SUM(J{debut}:J{fin}))')
+            sub_k = sub_j
         else:
             sub_j = sub_k = 0
         vals = ["Ss-total"] + [None] * 8 + [sub_j, sub_k]
@@ -323,8 +342,14 @@ def _remplir_detail(ws, semelles, poteaux, poutres=None, longrines=None,
         subs[num] = row
         row += 1
 
-    tot_j = "+".join(f"J{r}" for r in subs.values())
-    tot_k = "+".join(f"K{r}" for r in subs.values())
+    _cells_j = ",".join(f"J{r}" for r in subs.values())
+    _cells_k = ",".join(f"K{r}" for r in subs.values())
+    _n = len(subs)
+    # Total général refusé si un sous-total est INCOMPLET (texte).
+    tot_j = (f'IF(COUNT({_cells_j})={_n},SUM({_cells_j}),"INCOMPLET")'
+             if _n else "0")
+    tot_k = (f'IF(COUNT({_cells_k})={_n},SUM({_cells_k}),"INCOMPLET")'
+             if _n else "0")
     vals = ["TOTAL GÉNÉRAL"] + [None] * 8 + [f"={tot_j}", f"={tot_k}"]
     _apply_row(ws, row, st_total, vals)
     return {"subs": subs, "total": row}
@@ -379,8 +404,7 @@ def _remplir_armatures(ws, semelles, poteaux, poutres):
     # --- Semelles ---
     for s in semelles:
         lab = s.get("type", "?")
-        a, b, h = float(s.get("a", 0)), float(s.get("b", 0)), \
-            float(s.get("h", 0))
+        a, b, h = _dim(s, "a"), _dim(s, "b"), _dim(s, "h")  # RG-6
         phi = int(s.get("phi", 0))
         nb_x, nb_y = int(s.get("nb_x", 0)), int(s.get("nb_y", 0))
         r0 = _ligne_mere([f"{lab}", s.get("axe", ""), s.get("file", ""),
@@ -395,8 +419,9 @@ def _remplir_armatures(ws, semelles, poteaux, poutres):
     # --- Poteaux ---
     for p in poteaux:
         lab = p.get("type", "?")
-        a, b = float(p.get("a", 0)), float(p.get("b", 0))
-        haut = p.get("hauteur", 3.0)
+        a = ou_a_renseigner(valeur_lue(p, "a"))
+        b = ou_a_renseigner(valeur_lue(p, "b"))
+        haut = ou_a_renseigner(valeur_lue(p, "hauteur"))  # RG-6
         r0 = _ligne_mere([f"{lab}", p.get("axe", ""), p.get("file", ""),
                           a, b, haut])
         for lb in p.get("long_bars", []) or []:
@@ -415,8 +440,8 @@ def _remplir_armatures(ws, semelles, poteaux, poutres):
     # --- Poutres ---
     for p in poutres:
         lab = p.get("type", "?")
-        b, h = float(p.get("b", 0)), float(p.get("h", 0))
-        portee = p.get("portee")
+        b, h = _dim(p, "b"), _dim(p, "h")  # RG-6
+        portee = valeur_lue(p, "portee")
         r0 = _ligne_mere([f"{lab}", p.get("axe", ""), "",
                           b, h, portee if portee else None])
         for fi in (p.get("filants_inf", []) or []) + \
@@ -502,17 +527,23 @@ def _remplir_synthese(ws, semelles, poteaux, poutres):
 
     for s in semelles:
         lab, phi = s.get("type", "?"), int(s.get("phi", 0))
-        a = float(s.get("a", 0))
-        long_u = round((a - ENROBAGE) + COEF_ANCRAGE * phi / 1000, 3) \
-            if phi > 0 else 0
+        a = valeur_lue(s, "a")  # RG-6
+        if phi > 0 and a is not None:
+            long_u = round((a - ENROBAGE) + COEF_ANCRAGE * phi / 1000, 3)
+        elif phi > 0:
+            long_u = A_RENSEIGNER
+        else:
+            long_u = 0
         nb = int(s.get("nb_x", 0)) + int(s.get("nb_y", 0))
         _ligne_syn(f"Semelle {lab}", "Lit INF X & Y", 1, nb, phi, long_u)
     for p in poteaux:
         for lb in p.get("long_bars", []) or []:
             if lb.get("nb", 0) > 0 and lb.get("phi", 0) > 0:
-                haut = p.get("hauteur", 3.0)
+                haut = valeur_lue(p, "hauteur")  # RG-6 : pas de 3,0 m
                 _ligne_syn(f"Poteau {p.get('type', '?')}", "ARM LONG",
-                           1, lb["nb"], lb["phi"], round(haut + 0.50, 3))
+                           1, lb["nb"], lb["phi"],
+                           round(haut + 0.50, 3) if haut is not None
+                           else A_RENSEIGNER)
     for p in poutres:
         portee = p.get("portee")
         for fi in (p.get("filants_inf", []) or []) + \

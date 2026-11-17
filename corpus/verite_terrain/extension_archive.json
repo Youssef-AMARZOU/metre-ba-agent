@@ -1,0 +1,279 @@
+{
+  "plan_id": "extension_archive",
+  "statut": "brouillon",
+  "source": "métré Aménagement des locaux du bureau des plans et construction local pour Extension de l'archive du service Métodes et planning .xlsx",
+  "note": "Brouillon généré automatiquement depuis le métré manuel. À relire par l'ingénieur ; passer statut à 'valide' pour l'utiliser dans le benchmark.",
+  "familles": {
+    "semelles": {
+      "S1": {
+        "nombre": 15,
+        "positions": [
+          "A",
+          "A",
+          "A",
+          "H",
+          "B",
+          "B",
+          "C",
+          "C",
+          "D",
+          "D",
+          "E",
+          "E",
+          "F",
+          "F",
+          "G"
+        ],
+        "a": 1.5,
+        "b": 1.1,
+        "h": 0.4
+      },
+      "S2": {
+        "nombre": 8,
+        "positions": [
+          "B",
+          "C",
+          "D",
+          "D",
+          "E",
+          "F",
+          "G",
+          "G"
+        ],
+        "a": 1.8,
+        "b": 1.8,
+        "h": 0.5
+      }
+    },
+    "massifs": {
+      "MASSIF_60x60x60": {
+        "nombre": 2,
+        "positions": [
+          "B4",
+          "D4"
+        ],
+        "a": 0.6,
+        "b": 0.6,
+        "h": 0.6
+      }
+    },
+    "longrines": {
+      "LG2": {
+        "nombre": 11,
+        "positions": [
+          "A/B4",
+          "B/C2",
+          "C/D2",
+          "B1_2",
+          "B2_5",
+          "C1_2",
+          "C2_5",
+          "D1_2",
+          "D2_5",
+          "E1_4",
+          "F1_4"
+        ],
+        "b": 0.3,
+        "h": 0.37,
+        "longueur_totale": 41.02
+      },
+      "LG1": {
+        "nombre": 5,
+        "positions": [
+          "D/E4",
+          "E/F4",
+          "F/G4",
+          "E4_6",
+          "F4_6"
+        ],
+        "b": 0.3,
+        "h": 0.32,
+        "longueur_totale": 23.81,
+        "sections_variantes": [
+          [
+            3.17,
+            0.3,
+            0.32
+          ],
+          [
+            4.6,
+            0.3,
+            0.32
+          ],
+          [
+            4.8,
+            0.3,
+            0.32
+          ],
+          [
+            5.62,
+            0.3,
+            0.32
+          ],
+          [
+            5.62,
+            0.3,
+            0.37
+          ]
+        ]
+      }
+    },
+    "poteaux": {
+      "P1": {
+        "nombre": 19,
+        "positions": [
+          "A3",
+          "A4",
+          "A5",
+          "H1",
+          "B1",
+          "B5",
+          "C1",
+          "C5",
+          "D1",
+          "D5",
+          "D6",
+          "E1",
+          "E6",
+          "F1",
+          "F6",
+          "G1",
+          "G4",
+          "G6",
+          "F4"
+        ],
+        "a": 0.3,
+        "b": 0.3,
+        "hauteur": 3.6
+      },
+      "P2": {
+        "nombre": 1,
+        "positions": [
+          "B2"
+        ],
+        "a": 0.3,
+        "b": 0.3,
+        "hauteur": 3.6
+      },
+      "P3": {
+        "nombre": 1,
+        "positions": [
+          "C2"
+        ],
+        "a": 0.3,
+        "b": 0.3,
+        "hauteur": 3.6
+      },
+      "P4": {
+        "nombre": 1,
+        "positions": [
+          "D2"
+        ],
+        "a": 0.3,
+        "b": 0.3,
+        "hauteur": 3.6
+      },
+      "P5": {
+        "nombre": 1,
+        "positions": [
+          "E4"
+        ],
+        "a": 0.3,
+        "b": 0.3,
+        "hauteur": 3.6
+      }
+    },
+    "poutres": {
+      "N4": {
+        "nombre": 8,
+        "positions": [
+          "A3_4",
+          "A4_5",
+          "H/B1",
+          "G1_4",
+          "A/B5",
+          "B1_2",
+          "C1_2",
+          "D1_2"
+        ],
+        "b": 0.25,
+        "h": 0.4,
+        "longueur_totale": 25.52
+      },
+      "N3": {
+        "nombre": 5,
+        "positions": [
+          "A/H3",
+          "B/C1",
+          "D/E1",
+          "B/C5",
+          "D/E6"
+        ],
+        "b": 0.25,
+        "h": 0.35,
+        "longueur_totale": 12.55
+      },
+      "N5": {
+        "nombre": 7,
+        "positions": [
+          "C/D1",
+          "E/F1",
+          "F/G1",
+          "C/D5",
+          "E/F6",
+          "F/G6",
+          "E1_4"
+        ],
+        "b": 0.25,
+        "h": 0.45,
+        "longueur_totale": 34.48
+      },
+      "N6": {
+        "nombre": 3,
+        "positions": [
+          "G4_6",
+          "E4_6",
+          "F1_4"
+        ],
+        "b": 0.25,
+        "h": 0.5,
+        "longueur_totale": 15.36
+      },
+      "N2": {
+        "nombre": 1,
+        "positions": [
+          "D5_6"
+        ],
+        "b": 0.25,
+        "h": 0.3,
+        "longueur_totale": 2.12
+      },
+      "PN": {
+        "nombre": 6,
+        "positions": [
+          "A/B4",
+          "B/C2",
+          "C/D2",
+          "D/E4",
+          "E/F4",
+          "F/G4"
+        ],
+        "b": 0.25,
+        "h": 0.25,
+        "longueur_totale": 23.69
+      },
+      "N7": {
+        "nombre": 4,
+        "positions": [
+          "B2_5",
+          "C2_5",
+          "D2_5",
+          "F4_6"
+        ],
+        "b": 0.25,
+        "h": 0.55,
+        "longueur_totale": 21.58
+      }
+    }
+  }
+}

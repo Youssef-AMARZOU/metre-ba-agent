@@ -3355,7 +3355,7 @@ class VectorPlanExtractor:
         # --- RAPPORT METIER (regles metier genie civil) ---
         metier_report = self._build_metier_report(cat)
 
-        return {
+        plan_data = {
             "projet": {"nom": "Projet extrait", "date": None},
             "catalogue_types": cat,
             "implantations": self.implantations,
@@ -3382,6 +3382,16 @@ class VectorPlanExtractor:
                 "level_clustering": level_clustering,
             },
         }
+        # --- GARDE-FOUS "zero valeur inventee" (RG-6 / RG-7) ---
+        # Ajoute _meta.verifiabilite + un avertissement. Additif : ne
+        # modifie aucune valeur extraite.
+        try:
+            from core.guardrails import annoter_verifiabilite
+            annoter_verifiabilite(plan_data)
+        except Exception as exc:
+            plan_data["_meta"]["avertissements"].append(
+                f"Garde-fous non appliques : {exc}")
+        return plan_data
 
 
 # ============================================================================
@@ -3613,3 +3623,20 @@ def extract_plan_auto(file_path, progress_callback=None):
     except (ExtractionError, OSError, ValueError) as exc:
         logger.warning("Extraction partielle pour %s: %s", file_path, exc)
         return partial_plan_data(str(exc))
+
+# ---------------------------------------------------------------------------
+# Garde-fou RG-7 : chaque extraction déclare sa vérifiabilité
+# (VERIFIABLE / PARTIEL / NON_VERIFIABLE) dans _meta.verifiabilite.
+# Additif : aucune valeur extraite n'est modifiée.
+# ---------------------------------------------------------------------------
+_extract_plan_auto_brut = extract_plan_auto
+
+
+def extract_plan_auto(file_path, progress_callback=None):  # noqa: F811
+    result = _extract_plan_auto_brut(file_path, progress_callback)
+    try:
+        from core.guardrails import annoter_verifiabilite
+        annoter_verifiabilite(result)
+    except Exception as exc:  # garde-fou : ne doit jamais casser l'extraction
+        logger.warning("Bilan de vérifiabilité impossible : %s", exc)
+    return result

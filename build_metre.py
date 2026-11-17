@@ -22,6 +22,21 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 
+from core.guardrails import A_RENSEIGNER, ou_a_renseigner, valeur_lue  # noqa: E402
+
+
+def _formule_volume(row: int) -> str:
+    """Volume F*G*H*I, ou « A RENSEIGNER » si une dimension manque (RG-6)."""
+    return (f'=IF(COUNTIF(G{row}:I{row},"{A_RENSEIGNER}")>0,"{A_RENSEIGNER}",'
+            f"F{row}*G{row}*H{row}*I{row})")
+
+
+def _formule_total(debut: int, fin: int) -> str:
+    """Somme refusée (« INCOMPLET ») tant qu'une ligne est à renseigner."""
+    return (f'=IF(COUNTIF(J{debut}:J{fin},"{A_RENSEIGNER}")>0,"INCOMPLET",'
+            f"SUM(J{debut}:J{fin}))")
+
+
 def _safe_float(value, default=0.0):
     if value is None or isinstance(value, bool):
         return default
@@ -75,7 +90,8 @@ def _normalise_plan_data(plan_data):
             cadres = dims.get("cadres")
             if isinstance(cadres, dict):
                 cadres["phi"] = _safe_int(cadres.get("phi"))
-                cadres["esp"] = _safe_float(cadres.get("esp"), 0.15)
+                # Pas d'espacement inventé (RG-6) : 0 = non lu.
+                cadres["esp"] = _safe_float(cadres.get("esp"), 0.0)
             catalogue[family][key] = dims
 
     implantations = {}
@@ -312,7 +328,7 @@ class FeuilleDetailFondation:
             ws.cell(row=row, column=9, value=PROFONDEUR_FOUILLE)
             # Formule Qté partielle
             ws.cell(row=row, column=10,
-                    value=f"=F{row}*G{row}*H{row}*I{row}")
+                    value=_formule_volume(row))
             ws.cell(row=row, column=10).font = FONT_FORMULE
             _style_row(ws, row, self.NUM_COLS)
             row += 1
@@ -322,7 +338,7 @@ class FeuilleDetailFondation:
             start_data = row - len(sem_impl)
             ws.cell(row=row, column=1, value="total").font = FONT_TOTAL
             ws.cell(row=row, column=10,
-                    value=f"=SUM(J{start_data}:J{row - 1})")
+                    value=_formule_total(start_data, row - 1))
             ws.cell(row=row, column=10).font = FONT_FORMULE
             ws.cell(row=row, column=11,
                     value=f"=SUM(K{start_data}:K{row - 1})")
@@ -355,7 +371,7 @@ class FeuilleDetailFondation:
             ws.cell(row=row, column=8, value=b + 0.20)
             ws.cell(row=row, column=9, value=0.10)  # Epaisseur propriete = 0.10
             ws.cell(row=row, column=10,
-                    value=f"=F{row}*G{row}*H{row}*I{row}")
+                    value=_formule_volume(row))
             ws.cell(row=row, column=10).font = FONT_FORMULE
             _style_row(ws, row, self.NUM_COLS)
             row += 1
@@ -365,7 +381,7 @@ class FeuilleDetailFondation:
             start_data = row - len(sem_impl)
             ws.cell(row=row, column=1, value="total").font = FONT_TOTAL
             ws.cell(row=row, column=10,
-                    value=f"=SUM(J{start_data}:J{row - 1})")
+                    value=_formule_total(start_data, row - 1))
             ws.cell(row=row, column=10).font = FONT_FORMULE
             ws.cell(row=row, column=11,
                     value=f"=SUM(K{start_data}:K{row - 1})")
@@ -388,9 +404,10 @@ class FeuilleDetailFondation:
         for inst in sem_impl:
             type_key = inst.get("type", "")
             dims = self.catalogue.get("semelles", {}).get(type_key, {})
-            a = dims.get("a", 0)
-            b = dims.get("b", 0)
-            h = dims.get("h", 0.25)
+            # RG-6 : section/épaisseur non lue -> « A RENSEIGNER »
+            a = ou_a_renseigner(valeur_lue(dims, "a"))
+            b = ou_a_renseigner(valeur_lue(dims, "b"))
+            h = ou_a_renseigner(valeur_lue(dims, "h"))
 
             ws.cell(row=row, column=2, value=inst.get("axe", ""))
             ws.cell(row=row, column=3, value=inst.get("file", ""))
@@ -400,7 +417,7 @@ class FeuilleDetailFondation:
             ws.cell(row=row, column=8, value=b)
             ws.cell(row=row, column=9, value=h)
             ws.cell(row=row, column=10,
-                    value=f"=F{row}*G{row}*H{row}*I{row}")
+                    value=_formule_volume(row))
             ws.cell(row=row, column=10).font = FONT_FORMULE
             _style_row(ws, row, self.NUM_COLS)
             row += 1
@@ -410,7 +427,7 @@ class FeuilleDetailFondation:
             start_data = row - len(sem_impl)
             ws.cell(row=row, column=1, value="total").font = FONT_TOTAL
             ws.cell(row=row, column=10,
-                    value=f"=SUM(J{start_data}:J{row - 1})")
+                    value=_formule_total(start_data, row - 1))
             ws.cell(row=row, column=10).font = FONT_FORMULE
             ws.cell(row=row, column=11,
                     value=f"=SUM(K{start_data}:K{row - 1})")
@@ -433,9 +450,10 @@ class FeuilleDetailFondation:
             for inst in pot_impl:
                 type_key = inst.get("type", "")
                 dims = self.catalogue.get("poteaux", {}).get(type_key, {})
-                a = dims.get("a", 0.25)
-                b = dims.get("b", 0.35)
-                hauteur = inst.get("hauteur", 3.0)
+                # RG-6 : aucune section/hauteur inventée -> « A RENSEIGNER »
+                a = ou_a_renseigner(valeur_lue(dims, "a"))
+                b = ou_a_renseigner(valeur_lue(dims, "b"))
+                hauteur = ou_a_renseigner(valeur_lue(inst, "hauteur"))
 
                 ws.cell(row=row, column=2, value=inst.get("axe", ""))
                 ws.cell(row=row, column=3, value=inst.get("file", ""))
@@ -445,7 +463,7 @@ class FeuilleDetailFondation:
                 ws.cell(row=row, column=8, value=b)
                 ws.cell(row=row, column=9, value=hauteur)
                 ws.cell(row=row, column=10,
-                        value=f"=F{row}*G{row}*H{row}*I{row}")
+                        value=_formule_volume(row))
                 ws.cell(row=row, column=10).font = FONT_FORMULE
                 _style_row(ws, row, self.NUM_COLS)
                 row += 1
@@ -453,7 +471,7 @@ class FeuilleDetailFondation:
             start_data = row - len(pot_impl)
             ws.cell(row=row, column=1, value="total").font = FONT_TOTAL
             ws.cell(row=row, column=10,
-                    value=f"=SUM(J{start_data}:J{row - 1})")
+                    value=_formule_total(start_data, row - 1))
             ws.cell(row=row, column=10).font = FONT_FORMULE
             ws.cell(row=row, column=11,
                     value=f"=SUM(K{start_data}:K{row - 1})")
@@ -608,8 +626,7 @@ class FeuilleArmatures:
             long_bars = dims.get("long_bars", [])
             cadres = dims.get("cadres", {})
             phi_c = cadres.get("phi", 0)
-            esp_c = cadres.get("esp", 0.15)
-            hauteur = inst.get("hauteur", 3.0)
+            esp_c = valeur_lue(cadres, "esp")  # None si non lu (RG-6)
 
             # Longitudinaux
             for lb in long_bars:
@@ -630,10 +647,14 @@ class FeuilleArmatures:
 
             # Cadres
             ws.cell(row=row, column=1, value="CADRE")
-            ws.cell(row=row, column=7, value=f"=ROUNDUP(F{row - len(long_bars) - 1}/{esp_c},0)+2")
-            ws.cell(row=row, column=7).font = FONT_FORMULE
-            ws.cell(row=row, column=8, value=f"=ROUNDUP(F{row - len(long_bars) - 1}/{esp_c},0)+2")
-            ws.cell(row=row, column=8).font = FONT_FORMULE
+            if esp_c is None:
+                ws.cell(row=row, column=7, value=A_RENSEIGNER)
+                ws.cell(row=row, column=8, value=A_RENSEIGNER)
+            else:
+                ws.cell(row=row, column=7, value=f"=ROUNDUP(F{row - len(long_bars) - 1}/{esp_c},0)+2")
+                ws.cell(row=row, column=7).font = FONT_FORMULE
+                ws.cell(row=row, column=8, value=f"=ROUNDUP(F{row - len(long_bars) - 1}/{esp_c},0)+2")
+                ws.cell(row=row, column=8).font = FONT_FORMULE
             ws.cell(row=row, column=9, value=phi_c)
             ref_elem = row - len(long_bars) - 1
             ws.cell(row=row, column=10,
@@ -646,10 +667,14 @@ class FeuilleArmatures:
 
             # Epingles
             ws.cell(row=row, column=1, value="EPINGLE")
-            ws.cell(row=row, column=7, value=f"=ROUNDUP(F{row - len(long_bars) - 2}/{esp_c},0)+2")
-            ws.cell(row=row, column=7).font = FONT_FORMULE
-            ws.cell(row=row, column=8, value=f"=ROUNDUP(F{row - len(long_bars) - 2}/{esp_c},0)+2")
-            ws.cell(row=row, column=8).font = FONT_FORMULE
+            if esp_c is None:
+                ws.cell(row=row, column=7, value=A_RENSEIGNER)
+                ws.cell(row=row, column=8, value=A_RENSEIGNER)
+            else:
+                ws.cell(row=row, column=7, value=f"=ROUNDUP(F{row - len(long_bars) - 2}/{esp_c},0)+2")
+                ws.cell(row=row, column=7).font = FONT_FORMULE
+                ws.cell(row=row, column=8, value=f"=ROUNDUP(F{row - len(long_bars) - 2}/{esp_c},0)+2")
+                ws.cell(row=row, column=8).font = FONT_FORMULE
             ws.cell(row=row, column=9, value=phi_c)
             ws.cell(row=row, column=10,
                     value=f"=D{row - 2}-{ENROBAGE_FONDATION}+{COEF_EPIGLE}*I{row}/1000")
@@ -724,7 +749,7 @@ class FeuilleArmatures:
                 dims = self.catalogue.get("poutres", {}).get(type_key, {})
                 b = dims.get("b", 0)
                 h = dims.get("h", 0)
-                portee = inst.get("portee", 3.0)
+                portee = ou_a_renseigner(valeur_lue(inst, "portee"))  # RG-6
                 filants_inf = dims.get("filants_inf", [])
                 filants_sup = dims.get("filants_sup", [])
                 cadres = dims.get("cadres", {})
@@ -770,12 +795,15 @@ class FeuilleArmatures:
 
                 # Cadres
                 phi_c = cadres.get("phi", 0)
-                esp_c = cadres.get("esp", 0.18)
+                esp_c = valeur_lue(cadres, "esp")  # RG-6 : pas de 0,18 m
                 ref_elem = row - nb_lines - 1
                 ws.cell(row=row, column=1, value="CADRE")
-                ws.cell(row=row, column=8,
-                        value=f"=ROUNDUP(F{ref_elem}/{esp_c},0)+2")
-                ws.cell(row=row, column=8).font = FONT_FORMULE
+                if esp_c is None:
+                    ws.cell(row=row, column=8, value=A_RENSEIGNER)
+                else:
+                    ws.cell(row=row, column=8,
+                            value=f"=ROUNDUP(F{ref_elem}/{esp_c},0)+2")
+                    ws.cell(row=row, column=8).font = FONT_FORMULE
                 ws.cell(row=row, column=9, value=phi_c)
                 ws.cell(row=row, column=10,
                         value=f"=(2*(D{ref_elem}+E{ref_elem})-{ENROBAGE_FONDATION}+"
@@ -878,6 +906,18 @@ def resoudre_chemin_template(base_dir=None):
     return str(cible)
 
 
+def _valeur_implantations(instances, type_key, cle):
+    """Valeur lue sur les implantations d'un type (hauteur, portée...).
+
+    Retourne la valeur si toutes les implantations lues concordent, sinon
+    None : on ne choisit pas arbitrairement entre deux lectures.
+    """
+    vals = {valeur_lue(i, cle) for i in instances or []
+            if isinstance(i, dict) and i.get("type") == type_key}
+    vals.discard(None)
+    return vals.pop() if len(vals) == 1 else None
+
+
 def adapter_plan_vers_injecteur(plan_data: dict) -> dict:
     """Convertit plan_data (catalogue_types + implantations) vers le format
     plat de l'injecteur : semelles/poteaux/poutres/longrines/chainages/murs/voiles."""
@@ -918,7 +958,10 @@ def adapter_plan_vers_injecteur(plan_data: dict) -> dict:
             "file": dims.get("file", ""),
             "a": dims.get("a", 0),
             "b": dims.get("b", 0),
-            "hauteur": dims.get("hauteur", 3.0),
+            # lue sur le type, sinon sur ses implantations ; jamais inventée
+            "hauteur": (valeur_lue(dims, "hauteur")
+                        or _valeur_implantations(impl.get("poteaux"), ref,
+                                                 "hauteur")),
             "long_bars": dims.get("long_bars", []) or [],
             "cadres": dims.get("cadres", {}) or {},
         })
@@ -935,7 +978,9 @@ def adapter_plan_vers_injecteur(plan_data: dict) -> dict:
             "axe": dims.get("axe", ""),
             "b": dims.get("b", 0),
             "h": dims.get("h", 0),
-            "portee": dims.get("longueur") or dims.get("portee"),
+            "portee": (valeur_lue(dims, "longueur", "portee")
+                       or _valeur_implantations(impl.get("poutres"), ref,
+                                                "portee")),
             "filants_inf": dims.get("filants_inf", []) or [],
             "filants_sup": dims.get("filants_sup", []) or [],
             "cadres": dims.get("cadres", {}) or {},
@@ -1000,7 +1045,7 @@ def adapter_plan_vers_injecteur(plan_data: dict) -> dict:
         voiles.append({
             "type": ref,
             "ep": dims.get("ep", dims.get("b", 0)),
-            "hauteur": dims.get("hauteur", 3.0),
+            "hauteur": valeur_lue(dims, "hauteur"),  # None si non lue (RG-6)
         })
 
     return {

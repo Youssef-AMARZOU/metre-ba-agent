@@ -1,0 +1,72 @@
+# Corpus de plans BA réels pour mesurer la généralisation (C1 / C5).
+#
+# Les PDF ne sont PAS versionnés (documents clients). Ils sont cherchés dans
+# le dossier PLANBA_CORPUS_DIR (par défaut : %USERPROFILE%\Downloads).
+# sha256_16 = 16 premiers caractères du SHA-256 : garantit que le benchmark
+# tourne sur le bon fichier.
+#
+# role :
+#   calibrage  -> plan sur lequel le code a été réglé. Ses scores ne
+#                 prouvent RIEN sur la généralisation.
+#   evaluation -> plan jamais utilisé pour régler le code. Seuls ces scores
+#                 comptent pour décider si une modification est acceptée.
+#
+# verite_terrain : JSON dans corpus/verite_terrain/. Utilisé seulement si
+# son champ "statut" vaut "valide" (relu par l'ingénieur).
+
+plans:
+  - id: str_eljadida_type2
+    fichier: "STR-SALLE DE CLASSE ELJADIDA-SIDI BANOUR-TYPE 2-09-05-2025-A0.pdf"
+    sha256_16: b0efd4e9986f27e1
+    role: calibrage
+    nature: vecteur
+    bet: "BET (cartouche STR, El Jadida)"
+    verite_terrain: null
+    note: "Plan de réglage de bdf7437. Aucun métré manuel disponible."
+
+  - id: str_eljadida_type4
+    fichier: "STR-SALLE DE CLASSE ELJADIDA-SIDI BANOUR-TYPE 4-08-05-2025-A0.pdf"
+    sha256_16: 4ad0c027d1bcdce8
+    role: evaluation
+    nature: vecteur
+    bet: "même BET que type 2"
+    verite_terrain: null
+    note: "Même bureau d'études que le plan de calibrage : utile pour la robustesse, faible pour la généralisation."
+
+  - id: extension_archive
+    fichier: "9 PLAN BA Extension Local Archive et Aménagement CC.pdf"
+    sha256_16: 2584f2e9e8c91292
+    role: evaluation
+    nature: vecteur
+    bet: "autre BET (AO 61948)"
+    verite_terrain: extension_archive.json
+    metre_source: "métré Aménagement des locaux du bureau des plans et construction local pour Extension de l'archive du service Métodes et planning .xlsx"
+    note: "Seul plan avec métré manuel réel apparié. Vérité terrain en brouillon : à valider."
+
+  - id: plan_ba_final
+    fichier: "PLAN BA final.pdf"
+    sha256_16: a80bddb2281f4a64
+    role: evaluation
+    nature: vecteur
+    bet: "inconnu"
+    verite_terrain: null
+    metre_source_probable: "métré MZINDA .xlsx"
+    note: "Appariement MZINDA probable (téléchargés à 7 s d'intervalle, P1-P4/S1-S5 cohérents) mais NON confirmé ; gabarit différent, extraction GT à faire à la main."
+
+  - id: plan_ba_r2_ilide
+    fichier: "ilide.info-plan-ba-r-2-pr_ea99ea203cb65f5982309fe45f53d811.pdf"
+    sha256_16: 46f4581c80565946
+    role: evaluation
+    nature: vecteur
+    bet: "inconnu (document pédagogique)"
+    verite_terrain: null
+
+  - id: bolbol_goumandey
+    fichier: "PLANS-BOLBOL-GOUMANDEY.pdf"
+    sha256_16: ec2e167f9810cb4e
+    role: evaluation
+    nature: vecteur
+    bet: "inconnu"
+    verite_terrain: null
+    note: "70 pages A3 (architecture + structure). Lent : exclu par défaut (--inclure-lents)."
+    lent: true

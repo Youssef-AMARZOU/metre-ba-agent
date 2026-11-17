@@ -39,6 +39,11 @@ output/.planba_history.json
 # --- Environnements & caches Python ---
 .venv/
 venv/
+
+# --- Secrets (clé Groq, etc.) : ne jamais committer ---
+.env
+.env.*
+*.env
 __pycache__/
 *.pyc
 .pytest_cache/
