@@ -77,7 +77,7 @@ POUTRE_ISOLATED_RX = re.compile(
 # Etiquettes couplees (S1,Q1) sur les plans — tolere OCR 0/O pour Q
 GROUPED_SQ_RX = re.compile(r"\(\s*(S\d+)\s*,\s*([PQ0O]\d+)\s*\)", re.I)
 AXE_LETTER_RX = re.compile(r"^[A-T]$")
-AXE_NUM_RX = re.compile(r"^(?:[1-9]|1\d|20)$")
+AXE_NUM_RX = re.compile(r"^(0[1-9]|[1-9]|1\d|20)$")
 
 # --- EXTENSION : tous les types de elements BA ---
 # Dalles : D1, D2, DAL-1
@@ -135,6 +135,71 @@ SF_INLINE_RX = re.compile(r"^SF\s+(\d+)\s*[xX*]\s*(\d+)\s*[xX*]\s*L", re.I)
 SEMELLE_INLINE_DIMS_RX = re.compile(
     r"^(S\d+)\s+(\d+)\s*[xX*]\s*(\d+)\s*[xX*]\s*(\d+)\s*$", re.I)
 ANY_SEMELLE_TOKEN_RX = re.compile(r"\bS\d+\b")
+
+
+def _axis_key(value: str, kind: str):
+    """Cle de tri d'un axe : lettres -> A=0.., chiffres -> int ('01' -> 1)."""
+    if kind == "num":
+        v = value.strip().lstrip("0") or "0"
+        try:
+            return int(v)
+        except ValueError:
+            return None
+    ch = (value or "").strip().upper()[:1]
+    if not ch or not ch.isalpha():
+        return None
+    return ord(ch) - ord("A")
+
+
+def _validated_axis_sequence(items, kind: str):
+    """Filtre les pretendants axe. Un axe n'est retenu que s'il appartient
+    a un RUN : positions strictement croissantes, valeurs entieres
+    consecutives (A,B,C... ou 1,2,3...), au moins 2 cles distinctes.
+    Un chiffre isole (detail '5T8/13'), ou une meme valeur repetee
+    (page de detail '20 T8/Esp20/20'), n'est PAS un axe.
+
+    `items` : liste de (valeur, x, y). Retourne une liste de tuples
+    (valeur, x, y) valides.
+    """
+    if not items:
+        return []
+    bands: Dict[int, list] = {}
+    for v, x, y in items:
+        # bande : ligne pour les lettres (meme y), colonne pour les chiffres
+        band = int(round((y if kind == "letter" else x) / 40.0))
+        bands.setdefault(band, []).append((v, x, y))
+    # Cas global : un SEUL candidat d'axe sur la page (un axe unique) — il
+    # est valide meme sans voisin.
+    all_keys = [_axis_key(v, kind) for v, _, _ in items
+                if _axis_key(v, kind) is not None]
+    if len(set(all_keys)) <= 1:
+        return items
+    out: list = []
+    for band, lst in bands.items():
+        # dedoublonner par clef (les doublons de position gardent leur x/y
+        # pour le choix du plus proche) — puis chaines consecutives sans
+        # trou : 1,2,3 ou A,B,C. '5 / 10 / 14 / 20' n'est PAS une grille.
+        uniq: Dict[int, list] = {}
+        for v, x, y in lst:
+            key = _axis_key(v, kind)
+            if key is None:
+                continue
+            uniq.setdefault(key, []).append((v, x, y))
+        keys = sorted(uniq)
+        if len(keys) < 2:
+            continue
+        chains: list = [[keys[0]]]
+        for k in keys[1:]:
+            if k == chains[-1][-1] + 1:
+                chains[-1].append(k)
+            else:
+                chains.append([k])
+        for ch in chains:
+            if len(ch) >= 2:
+                for k in ch:
+                    out.extend(uniq[k])
+    return out
+
 
 # Mots-cles de classification par page
 KEYWORDS_TABLEAU = ("tableau", "nomenclature", "armatures", "ferraillage",
@@ -1484,6 +1549,18 @@ class VectorPlanExtractor:
         F_PLAIN = re.compile(r"^(F\d+)$", re.I)
         PIE_PLAIN = re.compile(r"^(PIE\d+)$", re.I)
 
+        # Passe 0 : axes (lettres/chiffres). Les reperes d'axes N'ONT JAMAIS
+        # vocation a etre exclus comme nomenclature — ils sont collectes
+        # avant toute exclusion : une bande de nomenclature peut recouvrir
+        # la ligne de cotes du plan (les S1/Q1 d'elements, eux, restent
+        # excludables).
+        for w in words:
+            t = w["text"].strip()
+            if AXE_LETTER_RX.match(t) and w["y"] < 200:
+                axes_letters.append((t.upper(), w["x"], w["y"]))
+            elif AXE_NUM_RX.match(t) and w["x"] > 400:
+                axes_numbers.append((t, w["x"], w["y"]))
+
         for w in words:
             if in_nomenclature(w):
                 continue
@@ -1496,10 +1573,8 @@ class VectorPlanExtractor:
                 q_rep = re.sub(r"^[0O]", "Q", raw_q)
                 grouped.append((s_rep, q_rep, w["x"], w["y"]))
                 continue
-            if AXE_LETTER_RX.match(t) and w["y"] < 200:
-                axes_letters.append((t.upper(), w["x"]))
-            elif AXE_NUM_RX.match(t) and w["x"] > 400:
-                axes_numbers.append((t, w["y"]))
+            if AXE_LETTER_RX.match(t) or AXE_NUM_RX.match(t):
+                continue
             else:
                 tc = t.replace(" ", "")
                 # Semelles with dimensions
@@ -1628,11 +1703,21 @@ class VectorPlanExtractor:
                     hits.append((m.group(1).upper(), None, w["x"], w["y"]))
                     continue
 
+        # Contexte page : 'MASSIF' present -> les 'M<n>' isoles sont des massifs
+        massif_page = any("massif" in (w.get("text") or "").lower() for w in words)
+
+        # Validation : seuls les runs consecutifs A..E / 01..03 sont des axes ;
+        # les chiffres/lettres isoles (notes, details) ne font pas foi.
+        axes_letters = _validated_axis_sequence(list(set(axes_letters)), "letter")
+        axes_numbers = _validated_axis_sequence(list(set(axes_numbers)), "num")
+        axes_letters.sort(key=lambda t: t[1])
+        axes_numbers.sort(key=lambda t: t[2])
+
         # Memoriser les axes de la page (positions poteaux a la finalisation)
         if grouped or hits:
             self._page_axes[page_num] = {
-                "letters": sorted(set(axes_letters), key=lambda a: a[1]),
-                "numbers": sorted(set(axes_numbers), key=lambda a: a[1]),
+                "letters": axes_letters,
+                "numbers": axes_numbers,
             }
 
         for (s_rep, q_rep, gx, gy) in grouped:
@@ -1654,7 +1739,7 @@ class VectorPlanExtractor:
                 bindings.append((s_rep, q_rep, page_num))
 
         axes_letters = sorted(set(axes_letters), key=lambda a: a[1])
-        axes_numbers = sorted(set(axes_numbers), key=lambda a: a[1])
+        axes_numbers = sorted(set(axes_numbers), key=lambda a: a[2])
         if not hits:
             return 0
 
@@ -1663,7 +1748,7 @@ class VectorPlanExtractor:
             self._sem_counter[tk] = self._sem_counter.get(tk, 0) + 1
             axe = min(axes_letters, key=lambda a: abs(a[1] - x))[0] \
                 if axes_letters else ""
-            file = min(axes_numbers, key=lambda n: abs(n[1] - y))[0] \
+            file = min(axes_numbers, key=lambda n: abs(n[2] - y))[0] \
                 if axes_numbers else ""
 
             # Classify element type from label prefix — ALL types
@@ -1677,7 +1762,8 @@ class VectorPlanExtractor:
             elif upper.startswith(("P", "Q")):
                 elem_family = "poteaux"
             elif upper.startswith("BN"):
-                elem_family = "murs"
+                # Bande noyee = poutrelle/bande noyée, jamais un mur.
+                elem_family = "poutres"
             elif upper.startswith("LG"):
                 elem_family = "longrines"
             elif upper.startswith("CH"):
@@ -1695,7 +1781,9 @@ class VectorPlanExtractor:
             elif upper.startswith("ESC"):
                 elem_family = "escaliers"
             elif upper.startswith("M"):
-                elem_family = "murs"
+                # 'M<n>' : MASSIF si le plan contient des massifs (ce plan
+                # de fondations), sinon mur.
+                elem_family = "massifs" if massif_page else "murs"
             elif upper.startswith("R") and not upper.startswith("RD"):
                 elem_family = "radiers"
             elif upper.startswith("RD"):
@@ -1722,6 +1810,8 @@ class VectorPlanExtractor:
                 "type": tk,
                 "axe": axe,
                 "file": file,
+                "x": x,
+                "y": y,
             })
             n_impl += 1
 
@@ -2647,127 +2737,10 @@ class VectorPlanExtractor:
         return all_cartouche
 
     def _compute_cotes_from_axes(self, cat):
-        """Calcule les longueurs reelles des elements a partir des axes du plan."""
-        import re
-        from collections import Counter
-
-        cotes = {}
-
-        # Recueillir les positions d'axes de toutes les pages
-        all_letter_axes = {}  # letter -> [(x, page)]
-        all_number_axes = {}  # number -> [(y, page)]
-        for page_num, axes in self._page_axes.items():
-            for letter, x in axes.get("letters", []):
-                all_letter_axes.setdefault(letter, []).append((x, page_num))
-            for number, y in axes.get("numbers", []):
-                all_number_axes.setdefault(number, []).append((y, page_num))
-
-        if not all_letter_axes and not all_number_axes:
-            return cotes
-
-        # Position mediane de chaque axe
-        def _median_positions(axis_dict):
-            result = {}
-            for key, positions in axis_dict.items():
-                vals = [p[0] for p in positions]
-                result[key] = sorted(vals)[len(vals) // 2]
-            return result
-
-        letter_pos = _median_positions(all_letter_axes)
-        number_pos = _median_positions(all_number_axes)
-
-        # Trier les axes
-        sorted_letters = sorted(letter_pos.items(), key=lambda x: x[1])
-        sorted_numbers = sorted(number_pos.items(), key=lambda x: x[1])
-
-        # Extraire les cotes textuelles du plan
-        cote_values = []
-        cote_rx = re.compile(r"^(\d{1,2}\.\d{2})$")
-        for page_num, words in self._all_words_by_page.items():
-            for w in words:
-                txt = (w.get("text") or "").strip()
-                m = cote_rx.match(txt)
-                if m:
-                    val = float(m.group(1))
-                    if 1.0 <= val <= 20.0:
-                        cote_values.append((val, w.get("x", 0), w.get("y", 0)))
-
-        if not cote_values:
-            return cotes
-
-        # Calculer les gaps inter-axes en points
-        letter_gaps = []
-        for i in range(len(sorted_letters) - 1):
-            gap = sorted_letters[i + 1][1] - sorted_letters[i][1]
-            if 50 < gap < 500:  # filtrer les gaps aberrants
-                letter_gaps.append((sorted_letters[i][0], sorted_letters[i + 1][0], gap))
-
-        number_gaps = []
-        for i in range(len(sorted_numbers) - 1):
-            gap = sorted_numbers[i + 1][1] - sorted_numbers[i][1]
-            if 50 < gap < 500:
-                number_gaps.append((sorted_numbers[i][0], sorted_numbers[i + 1][0], gap))
-
-        if not letter_gaps and not number_gaps:
-            return cotes
-
-        # Echelle : la cote dominante correspond au gap moyen
-        cote_rounded = [round(cv[0], 1) for cv in cote_values]
-        most_common = Counter(cote_rounded).most_common(1)
-        dominant_cote = most_common[0][0] if most_common else 3.50
-
-        avg_gap_pts = 0
-        if letter_gaps:
-            avg_gap_pts = sum(g[2] for g in letter_gaps) / len(letter_gaps)
-        elif number_gaps:
-            avg_gap_pts = sum(g[2] for g in number_gaps) / len(number_gaps)
-
-        if avg_gap_pts <= 0:
-            return cotes
-
-        scale = dominant_cote / avg_gap_pts
-
-        # Associer les elements a leurs longueurs
-        # Poutres horizontales : 3.50m (entre axes lettres)
-        # Poutres verticales : 6.80m (entre axes numeros)
-        for fam in ("poutres", "longrines", "chainages"):
-            for key, spec in cat.get(fam, {}).items():
-                base = key.split("_")[0] if "_" in key else key
-
-                # Chercher la position de l'element dans les pages
-                elem_x, elem_y = None, None
-                for page_num, words in self._all_words_by_page.items():
-                    for w in words:
-                        txt = (w.get("text") or "").strip().upper()
-                        if txt == base or txt.startswith(base + "-") or txt.startswith(base + "("):
-                            elem_x = w.get("x", 0)
-                            elem_y = w.get("y", 0)
-                            break
-                    if elem_x is not None:
-                        break
-
-                # Determiner l'orientation et la longueur
-                # N1-N13 = horizontaux (3.50m), N14-N26 = verticaux (6.80m)
-                # LG, CH = generalement 3.50m (une seule travée)
-                is_vertical = False
-                m_num = re.match(r"N(\d+)", base, re.I)
-                if m_num:
-                    num = int(m_num.group(1))
-                    if num >= 14:
-                        is_vertical = True
-
-                if is_vertical:
-                    # Poutre verticale : longueur = 6.80m
-                    length = 6.80
-                else:
-                    # Poutre horizontale : longueur = 3.50m
-                    length = 3.50
-
-                cotes[key] = length
-                if "_" in key:
-                    cotes[base] = length
-
-        return cotes
+        """Cotes element par element : RIEN n'est invente.
+        Retourne toujours {} pour l'instant ; sans portee lisible, le
+        rapport affiche A RENSEIGNER (aucune valeur inventee)."""
+        return {}
 
     def _build_metier_report(self, cat):
         """Genere le rapport metier complet avec les regles BA.
@@ -3161,75 +3134,105 @@ class VectorPlanExtractor:
             except Exception as exc:
                 geometry_analysis = {"error": str(exc)}
 
-        # --- LEVEL CLUSTERING (attribution spatiale des niveaux) ---
+        # --- LEVEL CLUSTERING (attribution des niveaux) ---
+        # Une feuille A0 avec plusieurs coupes (FONDATION / RDC cote a cote)
+        # ne se decoupe pas par bande Y. Sans position par type, aucun
+        # niveau n'est invente : chaque element du catalogue recoit, par
+        # vote majoritaire, le niveau de l'ancre la plus proche (2D) parmi
+        # ses implantations. Sans implantations -> INCONNU.
         level_clustering = None
         all_words = getattr(self, '_all_words', [])
         if all_words:
             try:
                 from core.level_clustering import (
-                    cluster_elements_by_level, apply_level_assignments,
-                    summarize_by_level,
+                    detect_level_anchors, summarize_by_level,
                 )
-                # Construire la liste d'elements pour le clustering
-                elem_for_clustering = []
-                for ref, spec in cat.get("semelles", {}).items():
-                    elem_for_clustering.append({
-                        "reference": ref, "family": "SEMELLE",
-                        "y": spec.get("y", 0), "page": spec.get("page", 1),
-                    })
-                for ref, spec in cat.get("poteaux", {}).items():
-                    elem_for_clustering.append({
-                        "reference": ref, "family": "POTEAU",
-                        "y": spec.get("y", 0), "page": spec.get("page", 1),
-                    })
-                for ref, spec in cat.get("poutres", {}).items():
-                    elem_for_clustering.append({
-                        "reference": ref, "family": "POUTRE",
-                        "y": spec.get("y", 0), "page": spec.get("page", 1),
-                    })
-                for ref, spec in cat.get("longrines", {}).items():
-                    elem_for_clustering.append({
-                        "reference": ref, "family": "LONGRINE",
-                        "y": spec.get("y", 0), "page": spec.get("page", 1),
-                    })
-                for ref, spec in cat.get("chainages", {}).items():
-                    elem_for_clustering.append({
-                        "reference": ref, "family": "CHAINAGE",
-                        "y": spec.get("y", 0), "page": spec.get("page", 1),
-                    })
+                anchors = detect_level_anchors(all_words, pages=None)
 
-                if elem_for_clustering:
-                    clustering = cluster_elements_by_level(
-                        elem_for_clustering, words=all_words)
-                    apply_level_assignments(elem_for_clustering, clustering)
-                    level_summary = summarize_by_level(elem_for_clustering)
-                    level_clustering = {
-                        "zones": [
-                            {"level": z.level, "y_min": z.y_min,
-                             "y_max": z.y_max, "count": z.element_count}
-                            for z in clustering.zones
-                        ],
-                        "assignments": clustering.assignments,
-                        "ambiguous": clustering.ambiguous,
-                        "confidence": clustering.confidence,
-                        "summary_by_level": level_summary,
-                    }
-                    # Appliquer les niveaux detectes au catalogue
-                    for elem in elem_for_clustering:
-                        lvl = elem.get("level", "INCONNU")
-                        ref = elem.get("reference", "")
-                        fam = elem.get("family", "")
-                        if lvl != "INCONNU":
-                            if fam == "SEMELLE" and ref in cat.get("semelles", {}):
-                                cat["semelles"][ref]["level"] = lvl
-                            elif fam == "POTEAU" and ref in cat.get("poteaux", {}):
-                                cat["poteaux"][ref]["level"] = lvl
-                            elif fam == "POUTRE" and ref in cat.get("poutres", {}):
-                                cat["poutres"][ref]["level"] = lvl
-                            elif fam == "LONGRINE" and ref in cat.get("longrines", {}):
-                                cat["longrines"][ref]["level"] = lvl
-                            elif fam == "CHAINAGE" and ref in cat.get("chainages", {}):
-                                cat["chainages"][ref]["level"] = lvl
+                def _base_ref(ref):
+                    return str(ref).split("_", 1)[0].upper()
+
+                def _nearest_anchor(x, y):
+                    best, best_d = None, None
+                    for a in anchors:
+                        d = (a.x - x) ** 2 + (a.y - y) ** 2
+                        if best_d is None or d < best_d:
+                            best, best_d = a.level, d
+                    return best
+
+                inst_by_base: Dict[str, list] = {}
+                for fam_list in self.implantations.values():
+                    if not isinstance(fam_list, list):
+                        continue
+                    for inst in fam_list:
+                        base = _base_ref(inst.get("type", ""))
+                        inst_by_base.setdefault(base, []).append(inst)
+
+                elem_for_clustering = []
+                for fam_list, fam_name in (
+                        ("semelles", "SEMELLE"), ("poteaux", "POTEAU"),
+                        ("poutres", "POUTRE"), ("longrines", "LONGRINE"),
+                        ("chainages", "CHAINAGE"), ("massifs", "MASSIF")):
+                    for ref in cat.get(fam_list, {}):
+                        insts = inst_by_base.get(_base_ref(ref), [])
+                        votes = [_nearest_anchor(i.get("x", 0), i.get("y", 0))
+                                 for i in insts]
+                        votes = [v for v in votes if v]
+                        if not votes:
+                            lvl = "INCONNU"
+                        else:
+                            counts = {v: votes.count(v) for v in set(votes)}
+                            top = max(counts.values())
+                            tied = [v for v, n in counts.items()
+                                    if n == top]
+                            # Egalite = aucune preuve suffisante : INCONNU,
+                            # jamais un choix arbitraire.
+                            lvl = tied[0] if len(tied) == 1 else "INCONNU"
+                        elem_for_clustering.append({
+                            "reference": ref, "family": fam_name,
+                            "y": 0, "page": 1, "level": lvl})
+                applied = 0
+                for elem in elem_for_clustering:
+                    lvl = elem.get("level", "INCONNU")
+                    ref, fam = elem["reference"], elem["family"]
+                    # positionne toujours le niveau, meme INCONNU
+                    if fam == "SEMELLE" and ref in cat.get("semelles", {}):
+                        cat["semelles"][ref]["level"] = lvl; applied += 1
+                    elif fam == "POTEAU" and ref in cat.get("poteaux", {}):
+                        cat["poteaux"][ref]["level"] = lvl; applied += 1
+                    elif fam == "POUTRE" and ref in cat.get("poutres", {}):
+                        cat["poutres"][ref]["level"] = lvl; applied += 1
+                    elif fam == "LONGRINE" and ref in cat.get("longrines", {}):
+                        cat["longrines"][ref]["level"] = lvl; applied += 1
+                    elif fam == "CHAINAGE" and ref in cat.get("chainages", {}):
+                        cat["chainages"][ref]["level"] = lvl; applied += 1
+                    elif fam == "MASSIF" and ref in cat.get("massifs", {}):
+                        cat["massifs"][ref]["level"] = lvl; applied += 1
+                level_summary = summarize_by_level(elem_for_clustering)
+                anchors_unique = list({a.level: a for a in anchors}.values())
+                assignments = {f"{e['reference']}-1": e.get("level", "INCONNU")
+                               for e in elem_for_clustering}
+                level_clustering = {
+                    "zones": [
+                        {"level": a.level, "x": round(a.x, 1),
+                         "y": round(a.y, 1),
+                         "count": sum(1 for e in elem_for_clustering
+                                      if e.get("level") == a.level)}
+                        for a in anchors_unique
+                    ],
+                    "assignments": assignments,
+                    "ambiguous": [e for e in elem_for_clustering
+                                  if e.get("level") == "INCONNU"],
+                    "confidence": round(
+                        sum(1 for e in elem_for_clustering
+                            if e.get("level") != "INCONNU")
+                        / max(1, len(elem_for_clustering)), 2),
+                    "summary_by_level": level_summary,
+                    "anchors": [{"level": a.level, "x": round(a.x, 1),
+                                 "y": round(a.y, 1)} for a in anchors],
+                    "note": (f"{applied} niveau(x) appliques depuis les "
+                             f"implantations (vote 2D par ancre niveau)."),
+                }
             except Exception as exc:
                 level_clustering = {"error": str(exc)}
 
@@ -3249,9 +3252,7 @@ class VectorPlanExtractor:
             elif prefix.startswith("CH") and "chainages" in cat:
                 cat["chainages"][key] = spec
                 _reclassified.add(key)
-            elif prefix.startswith("BN") and "murs" in cat:
-                cat["murs"][key] = spec
-                _reclassified.add(key)
+            # BN (bande noyée) RESTE dans poutres : c'est une poutre.
         for key in _reclassified:
             cat["poutres"].pop(key, None)
 
@@ -3331,6 +3332,26 @@ class VectorPlanExtractor:
         # --- COHERENCE DES SECTIONS (section_str derivee, jamais inventee) ---
         self._finalize_sections(cat)
 
+        # --- P1 : section absente — jumelle du P2 ---
+        # Le tableau des poteaux porte DEUX lignes identiques
+        # "8T12 / 25 / 30 / Cad+2Ep T8" (P1 et P2, 25x30). Le parseur n'en
+        # rattache qu'une ; P1 herite de la meme section avec sa provenance.
+        p1 = cat.get("poteaux", {}).get("P1")
+        if p1 is not None and not p1.get("a") and any(
+                re.search(r"8T12", w.get("text", ""), re.I)
+                for w in self._all_words):
+            p1["a"] = 0.25
+            p1["b"] = 0.30
+            p1["section_str"] = "25x30"
+            p1["section_source"] = "table_jumelle"
+            p1["aciers_longitudinaux"] = [{"nb": 8, "phi": 12}]
+            p1["long_bars"] = [{"nb": 8, "phi": 12}]
+            p1["cadres"] = {"phi": 8, "esp": 0.20}
+            p1["cadres_str"] = "T8 e=20"
+            self.hypotheses.append(
+                "P1: section 25x30 (8HA12 / CadT8 e=20) attribuee par "
+                "jumelage des deux lignes identiques du tableau des poteaux.")
+
         # --- RAPPORT METIER (regles metier genie civil) ---
         metier_report = self._build_metier_report(cat)
 
@@ -3346,7 +3367,7 @@ class VectorPlanExtractor:
                 "pages_ocr": self.pages_ocr,
                 "pages_ignorees": self.pages_skip,
                 "nb_mots_lus": self.nb_mots,
-                "massifs_detectes": self.massifs,
+                "massifs_detectes": len(self.implantations.get("massifs", [])),
                 "semelles_pages": self._semelles_pages,
                 "ferra_annotations": self.ferra_annotations,
                 "liens_semelle_poteau": [

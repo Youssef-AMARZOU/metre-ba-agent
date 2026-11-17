@@ -295,7 +295,6 @@ def classify_shapes(
                 page=s.page,
                 x=s.x,
                 y=s.y,
-                confidence=round(confidence, 2),
             ))
 
     return elements

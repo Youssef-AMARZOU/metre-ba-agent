@@ -272,7 +272,7 @@ class LinearMeasure:
     reference: str
     family: str
     section_cm: tuple[int, int] | None = None  # (b, h) en cm
-    length_m: float = 0.0
+    length_m: float | None = None      # None = portee non mesuree (A renseigner)
     level: str = "INCONNU"
     count: int = 1
 
@@ -283,7 +283,7 @@ class ConcreteVolume:
     reference: str
     family: str
     section_cm: tuple[int, int] | None = None
-    length_m: float = 0.0
+    length_m: float | None = None      # None = portee non mesuree (A renseigner)
     volume_m3: float = 0.0
     level: str = "INCONNU"
     count: int = 1
@@ -466,18 +466,9 @@ def compute_linear_by_type(
 ) -> list[LinearMeasure]:
     """Calcule le lineaire total par type d'element.
 
-    Si les cotes (longueurs) ne sont pas disponibles, estime un lineaire
-    moyen par type (defaut conservateur).
+    Aucune portee n'est inventee : sans cotes mesurables, `length_m`
+    reste None (A renseigner) et le rapport l'affiche explicitement.
     """
-    # Lineaire moyen estime par type (m) si pas de cotes
-    DEFAULT_LENGTHS = {
-        "POUTRE": 6.0, "LONGRINE": 6.0, "CHAINAGE": 6.0,
-        "POTEAU": 3.0, "SEMELLE": 2.0, "DALLE": 0.0,
-        "VOILE": 3.0, "BANDE_NOYEE": 6.0, "LINTEAU": 2.0,
-        "RADIER": 0.0, "MASSIF": 0.0, "REDRESSEUR": 0.0,
-        "ESCALIER": 0.0, "POUTRE_REDOUBLANTE": 6.0,
-    }
-
     # Grouper par (reference, section, niveau)
     groups: dict[tuple, list[Any]] = {}
     for elem in elements:
@@ -502,11 +493,8 @@ def compute_linear_by_type(
                 except ValueError:
                     pass
 
-        # Longueur
-        if cotes and ref in cotes:
-            length = cotes[ref]
-        else:
-            length = DEFAULT_LENGTHS.get(family, 6.0)
+        # Longueur — jamais inventée
+        length = cotes.get(ref) if cotes else None
 
         linears.append(LinearMeasure(
             reference=ref,
@@ -579,7 +567,7 @@ def compute_concrete_volumes(
 
     for lin in linears:
         vol = 0.0
-        if lin.section_cm and lin.length_m > 0:
+        if lin.section_cm and lin.length_m is not None and lin.length_m > 0:
             b_m = lin.section_cm[0] / 100.0
             h_m = lin.section_cm[1] / 100.0
             vol = b_m * h_m * lin.length_m * lin.count
@@ -875,15 +863,32 @@ def generate_metre_report(
     report.total_elements = len(elements)
 
     # 1. Coherence plan/tableaux
+    table_refs = None
     if words:
-        table_refs = extract_table_refs_from_text(words)
-        report.discrepancies = check_plan_table_coherence(elements, table_refs)
+        table_refs_present = extract_table_refs_from_text(words)
+        if any(table_refs_present.values()):
+            report.discrepancies = check_plan_table_coherence(
+                elements, table_refs_present)
+        elif any(re.search(r"TABLEAU", w.get("text", ""), re.I)
+                 for w in words):
+            # Une nomenclature est dessinee mais inlisible : le plan ne
+            # peut pas etre compare — on le DIT, on n'invente pas un ecart.
+            report.warnings.append(
+                "Nomenclature detectee mais illisible — ecarts plan/"
+                "tableaux non verifiables (aucune ligne lue).")
 
     # 2. Lineaire par type
     report.linears = compute_linear_by_type(elements, cotes)
 
     # 3. Verification ferraillage
     report.missing_ferraillage = check_ferraillage_coverage(elements, ferra_sections)
+
+    # Lineaires/volumes non mesurables : le dire, pas inventer
+    n_unknown = sum(1 for l in report.linears if l.length_m is None)
+    if n_unknown:
+        report.warnings.append(
+            f"Portee(s) non cotees sur le plan pour {n_unknown} type(s) — "
+            f"lineaires et volumes beton NON CALCULABLES (A RENSEIGNER).")
 
     # 4. Volume beton
     report.concrete_volumes, report.total_concrete_m3 = compute_concrete_volumes(
@@ -975,6 +980,11 @@ def format_metre_report(report: MetreReport) -> str:
     lines.append("  " + "-" * 76)
     for lin in report.linears:
         sec = f"{lin.section_cm[0]}x{lin.section_cm[1]}" if lin.section_cm else "-"
+        if lin.length_m is None:
+            lines.append(
+                f"  {lin.reference:<10} {lin.family:<20} {sec:<12} "
+                f"{lin.level:<12} {lin.count:<5} {'non cote':<8} {'—':<8}")
+            continue
         total = lin.length_m * lin.count
         lines.append(
             f"  {lin.reference:<10} {lin.family:<20} {sec:<12} {lin.level:<12} "
@@ -986,6 +996,12 @@ def format_metre_report(report: MetreReport) -> str:
     lines.append("--- VOLUME BETON ESTIME ---")
     total_vol = 0.0
     for cv in report.concrete_volumes:
+        if cv.length_m is None:
+            sec = f"{cv.section_cm[0]}x{cv.section_cm[1]}" if cv.section_cm else "-"
+            lines.append(
+                f"  {cv.reference:<10} {cv.family:<20} {sec:<12} "
+                f"{cv.level:<12} {cv.count}x — = A RENSEIGNER")
+            continue
         if cv.volume_m3 > 0:
             sec = f"{cv.section_cm[0]}x{cv.section_cm[1]}" if cv.section_cm else "-"
             lines.append(
@@ -993,7 +1009,9 @@ def format_metre_report(report: MetreReport) -> str:
                 f"{cv.level:<12} {cv.count}x{cv.length_m:.1f}m = {cv.volume_m3:.3f} m3"
             )
             total_vol += cv.volume_m3
-    lines.append(f"  {'TOTAL':.<54} {total_vol:.3f} m3")
+    n_unknown = sum(1 for cv in report.concrete_volumes if cv.length_m is None)
+    suffix = f" (+ {n_unknown} types NON COTES)" if n_unknown else ""
+    lines.append(f"  {'TOTAL':.<54} {total_vol:.3f} m3{suffix}")
     lines.append("")
 
     # 5. Ferraillage manquant

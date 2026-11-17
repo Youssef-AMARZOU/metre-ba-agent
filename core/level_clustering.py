@@ -25,7 +25,7 @@ LEVEL_PATTERNS = [
     (re.compile(r"R\s*\+\s*2|DEUXIEME?\s*ETAGE|2EME?\s*ETAGE", re.I), "R+2"),
     (re.compile(r"R\s*\+\s*3|TROISIEME?\s*ETAGE|3EME?\s*ETAGE", re.I), "R+3"),
     (re.compile(r"R\s*\+\s*4|QUATRIEME?\s*ETAGE|4EME?\s*ETAGE", re.I), "R+4"),
-    (re.compile(r"TOIT|TERRASSE|TOITURE|PLEIN\s*DE\s*CHARGE", re.I), "TOIT"),
+    (re.compile(r"TOIT|TERRASSE\s+ACCESSIBLE|TOITURE|PLEIN\s*DE\s*CHARGE", re.I), "TOIT"),
     (re.compile(r"PL\s*\.?\s*HT\s*\.?\s*RDC|RDC\s*PLEIN", re.I), "RDC"),
     (re.compile(r"PL\s*\.?\s*HT\s*\.?\s*R\s*\+\s*1|R\+1\s*PLEIN", re.I), "R+1"),
     (re.compile(r"PL\s*\.?\s*HT\s*\.?\s*R\s*\+\s*2|R\+2\s*PLEIN", re.I), "R+2"),
